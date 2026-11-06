@@ -1,0 +1,14 @@
+# secrets and personal data: never upload
+.env
+*.db
+*.db-journal
+profiles/
+backups/
+logs/
+diagnose/
+.run.lock
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
