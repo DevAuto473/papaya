@@ -510,6 +510,8 @@ class Bot:
             return f"{title}\n\n{body}"[:4000], kb([back if name == "-" else [("رجوع ⬅️", f"adm:dev:{name}")]])
         if name not in self.names:
             return self.admin_view("home")
+        if kind == "set":
+            return self._admin_settings_view(name)
         a = next(r for r in self.db.accounts() if r["name"] == name)
         if kind == "unl":
             return (f"متأكد تبي تفك ربط <b>{escape(name)}</b>؟\nبيوقف يوصله أي شي لين تربطه من جديد.",
@@ -527,11 +529,45 @@ class Bot:
         st = self.db.ai_stats(name, now.strftime("%Y-%m"))
         text += (f"\n• الـ AI هذا الشهر: {st['solved']} واجب · {st['tokens']:,} توكن · {st['cost']:.2f}$ 🤖")
         rows = [[("اسحب ميزة الحل 🚫" if a["solver"] else "أعط ميزة الحل 🆘", f"adm:sol:{name}")],
-                [("افحص الحين 🔄", f"adm:chk:{name}"), ("سجله 📜", f"adm:log:{name}")]]
+                [("افحص الحين 🔄", f"adm:chk:{name}"), ("سجله 📜", f"adm:log:{name}")],
+                [("الإعدادات ⚙️", f"adm:set:{name}")]]
+        if a["solver"]:
+            rows.append([("حل كل واجباته 🆘", f"adm:solveall:{name}"), ("سلّم الجاهز 📤", f"adm:submitall:{name}")])
         if a["chat_id"]:
             rows.append([("فك الربط 🔗", f"adm:unl:{name}")])
         rows.append(back)
         return text, kb(rows)
+
+    def _admin_settings_view(self, name: str):
+        t, m = settings_view(self.db, name)
+        rows = [[{**b, "callback_data": f"adm:aset:{name}:{b['callback_data']}"} for b in row]
+                for row in m["inline_keyboard"]]
+        rows.append([{"text": "رجوع ⬅️", "callback_data": f"adm:dev:{name}"}])
+        return t, {"inline_keyboard": rows}
+
+    def _apply_setting(self, db, account: str, kind: str, rest: str) -> bool:
+        """Shared by the owner's /settings buttons and the admin panel's per-device settings."""
+        if kind == "r":
+            db.set_setting(account, "remind_hours", float(rest))
+        elif kind == "h":
+            if int(rest) not in HORIZON_AR:
+                return False
+            db.set_setting(account, "horizon_days", int(rest))
+        elif kind == "q":
+            a_, b_ = rest.split(":")
+            db.set_setting(account, "quiet_start", int(a_)); db.set_setting(account, "quiet_end", int(b_))
+        elif kind == "t":
+            allowed = {"notify_new", "notify_remind", "remind_external"}
+            if db.solver_enabled(account):
+                allowed |= {"auto_solve", "auto_submit", "direct_submit"}
+            allowed.add("autoclean")
+            if rest not in allowed:
+                return False
+            cur = getattr(db.get_settings(account), rest)
+            db.set_setting(account, rest, 0 if cur else 1)
+        else:
+            return False
+        return True
 
     def health_text(self) -> str:
         import os, shutil, subprocess
@@ -590,9 +626,21 @@ class Bot:
                 pass
             return
         page = "home" if kind == "home" else f"{kind}:{name}"
-        if kind in ("sol", "unl2", "chk") and name not in self.names:
+        if kind in ("sol", "unl2", "chk", "solveall", "submitall") and name not in self.names:
             return
-        if kind == "sol":
+        if kind == "aset":
+            devname, _, setting = name.partition(":")
+            skind, _, svalue = setting.partition(":")
+            if devname in self.names:
+                self._apply_setting(self.db, devname, skind, svalue)
+            page = f"set:{devname}"
+        elif kind in ("solveall", "submitall"):
+            if not (self.solver and self.db.solver_enabled(name)):
+                return
+            fn = self.solver.solve_all if kind == "solveall" else self.solver.submit_all
+            self.spawn(fn, name, "-", self.admin_id)
+            page = f"dev:{name}"
+        elif kind == "sol":
             on = not self.db.solver_enabled(name)
             self.db.set_solver(name, on)
             self.db.log(name, "أعطيت ميزة الحل 🆘" if on else "سحبت ميزة الحل 🚫")
@@ -717,23 +765,8 @@ class Bot:
             return self.spawn(self._then_refresh_view(fn, kind, cq["message"]), account, rest, chat)
         if kind not in ("r", "h", "q", "t"):       # unknown button: never fall through to the settings page
             return
-        if kind == "r":
-            self.db.set_setting(account, "remind_hours", float(rest))
-        elif kind == "h":
-            if int(rest) not in HORIZON_AR:
-                return
-            self.db.set_setting(account, "horizon_days", int(rest))
-        elif kind == "q":
-            a, b = rest.split(":"); self.db.set_setting(account, "quiet_start", int(a)); self.db.set_setting(account, "quiet_end", int(b))
-        elif kind == "t":
-            allowed = {"notify_new", "notify_remind", "remind_external"}
-            if self.db.solver_enabled(account):
-                allowed |= {"auto_solve", "auto_submit", "direct_submit"}
-            allowed.add("autoclean")
-            if rest not in allowed:
-                return
-            cur = getattr(self.db.get_settings(account), rest)
-            self.db.set_setting(account, rest, 0 if cur else 1)
+        if not self._apply_setting(self.db, account, kind, rest):
+            return
         t, m = settings_view(self.db, account)
         self.api.call("editMessageText", chat_id=chat, message_id=mid, text=t, parse_mode="HTML", reply_markup=m)
 
