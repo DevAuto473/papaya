@@ -392,6 +392,83 @@ def _relogin(page, profile: Path, url: str, now: float) -> None:
     RELOGGED[key] = now
 
 
+def _fill_first(page, selectors, value: str) -> bool:
+    for sel in selectors:
+        loc = page.locator(sel)
+        try:
+            if loc.count() and loc.first.is_visible():
+                loc.first.fill(value, timeout=5000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+_MS_NEXT = ["#idSIButton9", "button[data-testid='primaryButton']", "input[type='submit']"]
+
+
+def auto_first_login(profile: Path, email: str, password: str, start_url: str = BASE) -> dict:
+    """Fully automatic first-ever login for a brand-new account: used right after someone
+    finishes the /start signup, so no person has to open a browser. The bot types the email
+    and password itself - both are only ever held in memory by the caller for a few seconds,
+    never written to disk. Then it finds its own 'واجباتي' / 'اختباراتي' pages, no person
+    needed. Raises NeedsPerson if Microsoft asks for something only a person can give
+    (a code, a forgotten account, several accounts), or ScrapeError/SessionExpired on
+    anything else that went wrong."""
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    found: dict = {}
+    try:
+        (Path(profile) / BOUND).unlink()
+    except OSError:
+        pass
+    with sync_playwright() as p:
+        ctx = _ctx(p, profile, headless=True)
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto(start_url, wait_until="domcontentloaded", timeout=45000)
+            if page.locator(NAV_ANY).count() == 0:
+                if not _madrasati_login_click(page):
+                    raise ScrapeError("ما قدرت أفتح صفحة الدخول", "could not open the login page")
+                page.wait_for_timeout(1500)
+                host = (page.url.split("/")[2] if "://" in page.url else "").lower()
+                if not (any(h in host for h in MS_HOSTS) or "microsoft" in host or "adfs" in host or "sts" in host):
+                    raise ScrapeError("ما طلعت صفحة مايكروسوفت", "did not reach a Microsoft login page")
+                if not _fill_first(page, ["input[name='loginfmt']", "input[type='email']"], email):
+                    raise NeedsPerson("email")
+                _click_first(page, _MS_NEXT)
+                page.wait_for_timeout(1500)
+                if not _fill_first(page, ["input[name='passwd']", "input[type='password']"], password):
+                    raise NeedsPerson("password")
+                _click_first(page, _MS_NEXT)
+                for _ in range(8):
+                    page.wait_for_timeout(1500)
+                    host = (page.url.split("/")[2] if "://" in page.url else "").lower()
+                    if host.endswith("madrasati.sa") and page.locator(NAV_ANY).count():
+                        break
+                    if any(h in host for h in MS_HOSTS) or "microsoft" in host or "adfs" in host or "sts" in host:
+                        _ms_step(page, email, {})
+                else:
+                    raise ScrapeError("ما رجع لمدرستي بعد تسجيل الدخول", "did not return to madrasati after sign-in")
+            for key, title in TITLES.items():
+                link = page.get_by_text(title, exact=True)
+                if link.count() == 0:
+                    raise ScrapeError(f"ما لقيت رابط {title}", f"nav link for {url_kind(title)} not found")
+                link.first.click(timeout=8000)
+                page.wait_for_load_state("domcontentloaded")
+                try:
+                    page.wait_for_selector(".mainTitlePage", timeout=15000)
+                except PWTimeout:
+                    raise ScrapeError(f"صفحة {title} ما حمّلت", f"{url_kind(title)} page did not load")
+                if _title_of(page) != title:
+                    raise ScrapeError(f"صفحة {title} غير متوقعة", f"unexpected {url_kind(title)} page")
+                found[key] = _current_tab(page.url) if key == "assign" else page.url
+            page.wait_for_timeout(1200)
+        finally:
+            ctx.close()
+    bind_email(profile, email)
+    return found
+
+
 _PAGES = re.compile(r"صفحة\s*(\d+)\s*من\s*(\d+)")
 MAX_PAGES = 10
 

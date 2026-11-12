@@ -37,6 +37,42 @@ def test_link_flow_admin_approves():
     assert "papaya01" in api.sent(KID)[-1]["text"]
 
 
+def test_signup_auto_login_success(monkeypatch):
+    import json
+    api, db, bot = mk()
+    bot.spawn = lambda fn, *a: fn(*a)                 # run the "background" thread inline for the test
+    bot.profile_dir = lambda name: pathlib.Path(f"/tmp/{name}")
+    monkeypatch.setattr("papaya.bot.scraper.auto_first_login",
+                        lambda profile, email, password: {"assign": "https://x/a", "exams": "https://x/e"})
+    bot.handle(msg(KID, "/start"))
+    bot.handle(msg(KID, "Sara"))
+    bot.handle(msg(KID, "0501234567"))
+    bot.handle(msg(KID, "sara@example.com"))
+    bot.handle(msg(KID, "secret123"))
+    assert db.chat_id("papaya01") == KID               # first free device, picked automatically
+    assert json.loads(db.get_meta("urls:papaya01")) == {"assign": "https://x/a", "exams": "https://x/e"}
+    assert db.get_meta("welcomed:papaya01") == "1"
+    assert any("✅" in (p.get("text") or "") for p in api.sent(ADMIN))  # admin told it worked
+
+
+def test_signup_auto_login_failure_frees_the_slot_and_falls_back(monkeypatch):
+    api, db, bot = mk()
+    bot.spawn = lambda fn, *a: fn(*a)
+    bot.profile_dir = lambda name: pathlib.Path(f"/tmp/{name}")
+
+    def boom(profile, email, password):
+        raise Exception("boom")
+    monkeypatch.setattr("papaya.bot.scraper.auto_first_login", boom)
+    bot.handle(msg(KID, "/start"))
+    bot.handle(msg(KID, "Sara"))
+    bot.handle(msg(KID, "0501234567"))
+    bot.handle(msg(KID, "sara@example.com"))
+    bot.handle(msg(KID, "secret123"))
+    assert db.chat_id("papaya01") is None              # freed back up, never actually logged in
+    admin_texts = " ".join(p.get("text") or "" for p in api.sent(ADMIN))
+    assert "papaya01" in admin_texts and "login papaya01" in admin_texts
+
+
 def test_settings_roundtrip():
     api, db, bot = mk(); db.set_chat("papaya01", KID)
     bot.handle(cb(KID, "r:6")); bot.handle(cb(KID, "q:0:7")); bot.handle(cb(KID, "t:notify_new"))

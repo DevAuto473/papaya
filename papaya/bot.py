@@ -10,6 +10,7 @@ import urllib.request
 from datetime import datetime
 from html import escape
 
+from . import scraper
 from .db import DB
 from .parser import RIYADH
 from .parser import Item
@@ -132,10 +133,11 @@ def _sig(text, kb) -> str:
 
 class Bot:
     def __init__(self, api, db: DB, admin_id: int | None, account_names: list[str],
-                 solver=None, spawn=None, refresh=None, db_factory=None):
+                 solver=None, spawn=None, refresh=None, db_factory=None, profile_dir=None):
         self.api, self.db, self.admin_id, self.names = api, db, admin_id, account_names
         self.refresh = refresh            # refresh(account) -> bool : read the platform right now
         self.db_factory = db_factory      # a fresh connection for work done in a background thread
+        self.profile_dir = profile_dir    # profile_dir(name) -> Path : enables fully-automatic signup login
         self._last_refresh: dict = {}
         self._signup: dict = {}           # chat -> answers so far. Memory only: the password never touches disk
         self.wipe_after = 3600            # seconds until the admin's copy of a password is deleted (None = never)
@@ -331,6 +333,18 @@ class Bot:
         who = msg.get("from", {})
         tg = escape(" ".join(filter(None, [who.get("first_name"), who.get("last_name")])) or "-")
         free = [n for n in self.names if self.db.chat_id(n) is None]
+        if free and self.profile_dir:
+            # fully automatic: grab the first free device ourselves and log it in right now,
+            # no admin tap needed. The password lives only in this call stack from here on.
+            name = free[0]
+            self.db.set_chat(name, chat)
+            self.db.set_meta(f"name:{name}", st["name"])
+            self.db.log(name, f"طلب ربط تلقائي — {st['name']} 🔗🤖")
+            self.say(chat, "تمام 👍 جاري تسجيل دخولك تلقائيًا بمنصة مدرستي، خذ شوية ثواني... ⏳")
+            self.api.call("sendMessage", chat_id=self.admin_id, parse_mode="HTML",
+                          text=f"طلب ربط جديد: <b>{escape(st['name'])}</b> (تيليجرام: {tg}) 👤\n"
+                               f"بربطه تلقائيًا بـ <b>{escape(name)}</b> وأسجّل دخوله الحين... 🤖⏳")
+            return self.spawn(self._auto_signup_login, name, chat, tg, st["name"], st["email"], val)
         text = (f"<b>طلب ربط جديد</b> 🔔\n{escape(st['name'])} (تيليجرام: {tg}) 👤\n"
                 f"<code>{escape(st.get('phone', '-'))}</code> 📱\n"
                 f"<code>{escape(st['email'])}</code> 📧\n<tg-spoiler><code>{escape(val)}</code></tg-spoiler> 🔐\n\n"
@@ -338,6 +352,41 @@ class Bot:
         rows = [[(n, f"link:{n}:{chat}")] for n in free] + [[("احذف البيانات 🗑", "wipe:-")]]
         res = self.api.call("sendMessage", chat_id=self.admin_id, text=text, parse_mode="HTML",
                             protect_content=True, reply_markup=kb(rows))
+
+    def _auto_signup_login(self, name, chat, tg, person, email, password):
+        """Runs in a background thread. `password` exists only as this call's local
+        variable: it is never written to the db, a file, or sent back through Telegram."""
+        db = self.db if self.db_factory is None else self.db_factory()
+        try:
+            found = scraper.auto_first_login(self.profile_dir(name), email, password)
+        except scraper.NeedsPerson as e:
+            why = {"password": "مايكروسوفت يطلب الباسوورد بشكل ما قدرت أتعامل معه",
+                   "code": "مايكروسوفت يطلب رمز تحقق (٢FA)",
+                   "email": "مايكروسوفت ما قبل الايميل",
+                   "other": "مايكروسوفت فاتح حساب ثاني بهذا المتصفح",
+                   "several": "فيه أكثر من حساب، ما قدرت أختار"}.get(str(e), "احتاج تدخل شخص")
+            return self._auto_signup_failed(db, name, chat, tg, person, why)
+        except scraper.PapayaError as e:
+            return self._auto_signup_failed(db, name, chat, tg, person, e.ar)
+        except Exception as e:
+            return self._auto_signup_failed(db, name, chat, tg, person, f"خطأ غير متوقع: {type(e).__name__}")
+        db.set_meta(f"urls:{name}", json.dumps(found))
+        db.set_meta(f"err:{name}", "")
+        db.set_meta(f"welcomed:{name}", "1")
+        db.log(name, "تسجيل دخول تلقائي بالمنصة ✅🤖")
+        self.set_commands()
+        on = db.solver_enabled(name)
+        self.say(chat, guide(on), menu(on))
+        self.say(self.admin_id, f"تم ✅ ربطت وسجّلت دخول <b>{escape(name)}</b> تلقائيًا — {escape(person)} جاهز الحين 🤖")
+
+    def _auto_signup_failed(self, db, name, chat, tg, person, why):
+        db.set_chat(name, None)       # free the slot back up, it never actually logged in
+        db.log(None, f"فشل الربط التلقائي لـ {person} ({why}) 🤖⚠️")
+        self.say(self.admin_id, f"ما قدرت أسجّل دخول <b>{escape(name)}</b> تلقائيًا لـ <b>{escape(person)}</b> "
+                                f"(تيليجرام: {tg}) ⚠️\n<i>{escape(why)}</i>\n\n"
+                                f"سجّله يدويًا من اللابتوب:\n<code>python -m papaya.main login {escape(name)}</code>\n"
+                                f"وبعدها اربطه بالضغط هنا 👇",
+                 kb([[(name, f"link:{name}:{chat}")], [("احذف البيانات 🗑", "wipe:-")]]))
         try:
             self.db.log_msg(self.admin_id, res["message_id"], datetime.now(RIYADH))
             if self.wipe_after:

@@ -350,7 +350,7 @@ def main(argv=None):
                                 finished=False)          # the button must be quick; the 10-min check reads 'Completed'
             return "ERROR" not in out
         bot = Bot(Api(tok), DB(db_path), admin_id(), accounts(), solver=make_solver(db_path, tok),
-                  refresh=refresh, db_factory=lambda: DB(db_path))
+                  refresh=refresh, db_factory=lambda: DB(db_path), profile_dir=profile_dir)
         bot.set_commands()
         print("papaya is running. Ctrl+C to stop.", flush=True)
         offset = None
