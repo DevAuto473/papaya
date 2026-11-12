@@ -44,9 +44,35 @@ HELP = (
     "أوامر إضافية: /remind 8 (التذكير قبل 8 ساعات) · /quiet 23 6 (ساعات الهدوء)\n"
     "اختفت الأزرار؟ أرسل /start"
 )
-ADMIN_HELP = ("\n\n<b>للمشرف:</b>\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
+ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
               "/grant papaya01 — إعطاء ميزة الحل\n/revoke papaya01 — سحب ميزة الحل")
 SOLVER_HELP = "\n<b>حل كل الواجبات</b> — أو اضغط 🆘 جنب أي واجب في «الواجبات والاختبارات» 🆘"
+
+GUIDE = (
+    "<b>تم تسجيلك في المنصة، البوت شغّال لك!</b> 🎉\n\n"
+    "<b>دليل سريع</b> 📖\n\n"
+    "<b>وش يسوي البوت؟</b>\n"
+    "يراقب واجباتك واختباراتك في مدرستي كل 10 دقايق، ويرسل لك:\n"
+    "• لما ينزل شي جديد قريب 🆕\n"
+    "• لما ينفتح واجب أو اختبار 🔓\n"
+    "• تذكير قبل النهاية ⏳\n\n"
+    "<b>الأزرار تحت</b> 👇\n"
+    "<b>الواجبات والاختبارات</b> 📋 — اللي ينتهي قريب، وتتحدث لحالها\n"
+    "<b>الإعدادات</b> ⚙️ — المدة، وقت التذكير، ساعات الهدوء\n"
+    "<b>تنظيف</b> 🧹 — يمسح المحادثة\n\n"
+    "<b>في الرسائل</b>\n"
+    "اضغط اسم الواجب أو الاختبار يفتح لك على طول\n"
+    "حليت اختبار؟ اضغط ✅ ورقمه ويختفي\n"
+    "الواجبات تختفي لحالها أول ما تسلّمها\n\n"
+    "<b>معلومات</b>\n"
+    "• ما يزعجك من 11م إلى 6ص (تقدر تغيّرها)\n"
+    "• الرسائل تنحذف لحالها بعد 24 ساعة\n"
+    "• الأزرار اختفت؟ أرسل /start"
+)
+
+
+def guide(solver_on: bool) -> str:
+    return GUIDE + ("\n\n<b>ميزة الحل:</b> زر 🆘 جنب الواجب يحله لك ويعرض الإجابات قبل التسليم" if solver_on else "")
 
 BTN_LIST, BTN_SETTINGS, BTN_CLEAR, BTN_SOLVEALL, BTN_HELP, BTN_ADMIN = (
     "الواجبات والاختبارات 📋", "الإعدادات ⚙️", "تنظيف 🧹", "حل كل الواجبات 🆘", "مساعدة ❓", "الإدارة 👑")
@@ -98,6 +124,11 @@ def settings_view(db: DB, account: str):
 LOADING: dict = {}                  # (account, item_id or "-") -> spinner label; shared by every Bot instance
 SPIN = ("⏳", "⌛")
 
+
+
+def _sig(text, kb) -> str:
+    import hashlib
+    return hashlib.md5((text + json.dumps(kb or {}, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()[:12]
 
 class Bot:
     def __init__(self, api, db: DB, admin_id: int | None, account_names: list[str],
@@ -203,6 +234,8 @@ class Bot:
                 return self.say(chat, "مثال: /name papaya03 أختي")
             self.db.set_meta(f"name:{args[0]}", " ".join(args[1:])[:40])
             return self.say(chat, f"سمّيت {escape(args[0])}: {escape(' '.join(args[1:])[:40])} ✅")
+        if is_admin and cmd == "/health":
+            return self.say(chat, self.health_text())
         if is_admin and cmd == "/admin":
             t, m = self.admin_view("home")
             return self.say(chat, t, m)
@@ -341,7 +374,33 @@ class Bot:
 
     def on_list(self, chat, account, now, stale: bool = False):
         t, kb = self.list_view(account, now, stale)
-        return self.say(chat, t, kb)
+        res = self.say(chat, t, kb)
+        try:                                   # remember it: the check loop keeps this one up to date
+            self.db.set_meta(f"listmsg:{account}", f"{chat}:{res['message_id']}")
+            self.db.set_meta(f"listsig:{account}", _sig(t, kb))
+        except Exception:
+            pass
+        return res
+
+    def update_live_list(self, account) -> bool:
+        """Redraw the last 📋 list this phone opened, when something in it changed."""
+        ref = self.db.get_meta(f"listmsg:{account}")
+        if not ref:
+            return False
+        chat, _, mid = ref.partition(":")
+        t, kb = self.list_view(account, datetime.now(RIYADH))
+        sig = _sig(t, kb)
+        if sig == self.db.get_meta(f"listsig:{account}"):
+            return False
+        try:
+            self.api.call("editMessageText", chat_id=int(chat), message_id=int(mid), text=t, parse_mode="HTML",
+                          disable_web_page_preview=True, reply_markup=kb or {"inline_keyboard": []})
+        except Exception as e:
+            if "not modified" not in str(e):
+                self.db.set_meta(f"listmsg:{account}", "")      # deleted or too old: stop following it
+                return False
+        self.db.set_meta(f"listsig:{account}", sig)
+        return True
 
     def list_view(self, account, now, stale: bool = False):
         items = [Item(kind=r["kind"], id=r["id"], title=r["title"], subject=r["subject"],
@@ -390,7 +449,7 @@ class Bot:
                 dot = "⚪" if not a["chat_id"] else "⚠️" if self.db.get_meta(f"err:{n}") else "🟢"
                 who = self._who(n)
                 rows.append([(f"{n}" + (f" · {who}" if who else "") + (" · 🆘" if a["solver"] else "") + f" {dot}", f"adm:dev:{n}")])
-            rows.append([("السجل 📜", "adm:log:-"), ("تحديث 🔄", "adm:home")])
+            rows.append([("السجل 📜", "adm:log:-"), ("الحالة 🩺", "adm:health"), ("تحديث 🔄", "adm:home")])
             return "\n".join(lines), kb(rows)
         kind, _, name = page.partition(":")
         if kind == "log":
@@ -425,8 +484,62 @@ class Bot:
         rows.append(back)
         return text, kb(rows)
 
+    def health_text(self) -> str:
+        import os, shutil, subprocess
+        from pathlib import Path
+        now = datetime.now(RIYADH)
+        home = Path(os.environ.get("PAPAYA_HOME", ".")).resolve()
+        def ago(iso):
+            try:
+                sec = (now - datetime.fromisoformat(iso).astimezone(RIYADH)).total_seconds()
+            except (TypeError, ValueError):
+                return "-"
+            h, m = divmod(int(sec // 60), 60)
+            d, h = divmod(h, 24)
+            return (f"{d} يوم " if d else "") + (f"{h} ساعة " if h else "") + f"{m} دقيقة"
+        out = ["🩺 <b>حالة النظام</b>",
+               f"⏱️ شغال من: {ago(self.db.get_meta('started_at'))}",
+               f"💓 آخر نبضة: قبل {ago(self.db.get_meta('heartbeat'))}"]
+        down = self.db.get_meta("net_down")
+        out.append(f"🌐 النت: {'مقطوع من ' + ago(down) + ' ⚠️' if down else 'شغال ✅'}")
+        out.append("\n<b>الحسابات</b>")
+        for a in self.db.accounts():
+            n = a["name"]
+            if n not in self.names:
+                continue
+            if not a["chat_id"]:
+                out.append(f"⚪ {n}: غير مربوط"); continue
+            err = self.db.get_meta(f"err:{n}")
+            last = self.db.get_meta(f"last_ok:{n}") or "-"
+            out.append(f"{'⚠️' if err else '🟢'} {n}: آخر فحص ناجح {last}" + (f"\n    {escape(err)}" if err else ""))
+        out.append("\n<b>الجهاز</b>")
+        try:
+            free = shutil.disk_usage(str(home)).free / 1e9
+            out.append(f"💾 المساحة الفاضية: {free:.1f} GB" + (" ⚠️" if free < 2 else ""))
+        except OSError:
+            pass
+        try:
+            out.append(f"🗄️ قاعدة البيانات: {(home / 'papaya.db').stat().st_size / 1e6:.1f} MB")
+        except OSError:
+            pass
+        out.append(f"🧷 آخر نسخة احتياطية: {self.db.get_meta('backup_day') or 'ما فيه'}")
+        try:
+            ver = subprocess.run(["git", "-C", str(home), "log", "-1", "--format=%h %cd", "--date=format:%m-%d %H:%M"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            ver = ""
+        out.append(f"🏷️ نسخة الكود: {escape(ver) or '-'}")
+        return "\n".join(out)
+
     def on_admin(self, chat, mid, rest):
         kind, _, name = rest.partition(":")
+        if kind == "health":
+            try:
+                self.api.call("editMessageText", chat_id=chat, message_id=mid, text=self.health_text(),
+                              parse_mode="HTML", reply_markup=kb([[("🔄 تحديث", "adm:health"), ("⬅️ رجوع", "adm:home")]]))
+            except Exception:
+                pass
+            return
         page = "home" if kind == "home" else f"{kind}:{name}"
         if kind in ("sol", "unl2", "chk") and name not in self.names:
             return
@@ -518,10 +631,21 @@ class Bot:
             if person:
                 self.db.set_meta(f"name:{name}", person)
             self.db.log(name, f"ربط{(' — ' + person) if person else ''} 🔗")
-            self.api.call("editMessageText", chat_id=chat, message_id=mid, text=f"تم الربط بـ {name} ✅")
+            if "🔐" in (cq["message"].get("text") or ""):     # signup form: keep the details until you log in
+                self.api.call("editMessageReplyMarkup", chat_id=chat, message_id=mid,
+                              reply_markup=kb([[("سجّلته، احذف البيانات 🗑", "wipe:-")]]))
+                self.say(chat, f"ربطته بـ <b>{escape(name)}</b> ✅\nالحين على اللابتوب سجّل دخوله بالبيانات اللي فوق:\n"
+                               f"<code>python -m papaya.main login {escape(name)}</code>")
+            else:
+                self.api.call("editMessageText", chat_id=chat, message_id=mid, text=f"تم الربط بـ {name} ✅")
             self.set_commands()
-            return self.say(int(user_chat), f"تم ربطك بالحساب <b>{escape(name)}</b> ✅\nأول فحص يوصلك فيه ملخص مواعيدك.\n\n"
-                            + HELP, menu(self.db.solver_enabled(name)))
+            on = self.db.solver_enabled(name)
+            urls = json.loads(self.db.get_meta(f"urls:{name}") or "{}")
+            if len(urls) == 2:                        # already logged in on the laptop: ready now
+                self.db.set_meta(f"welcomed:{name}", "1")
+                return self.say(int(user_chat), guide(on), menu(on))
+            return self.say(int(user_chat), "<b>المشرف قبلك!</b> ✅\n"
+                            "باقي خطوة وحدة: يسجّل دخولك في المنصة.\nأول ما يخلص يوصلك إشعار هنا مع دليل الاستخدام ⏳")
         account = self.db.account_for_chat(chat)
         if not account:
             return

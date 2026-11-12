@@ -126,6 +126,8 @@ def _valid_seq(seq, q: Question):
         return seq if sorted(seq) == list(range(1, n + 1)) else None
     if len(seq) != len(q.prompts) or not all(1 <= x <= n for x in seq):
         return None
+    if len(set(seq)) != len(seq):          # matching is one-to-one: the same answer twice is a mix-up
+        return None
     return seq
 
 

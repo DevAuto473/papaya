@@ -143,6 +143,46 @@ _FILL_JS = r"""
 }
 """
 
+# Read back what the page really holds, after everything was filled (a later question can
+# disturb an earlier one, e.g. a sortable list redrawing). Nothing is submitted unless it matches.
+_READ_JS = r"""
+([kind, meta]) => {
+  const card = [...document.querySelectorAll('div.dqc')].find(c => (c.querySelector('input.qid')||{}).value === meta.qid);
+  if (!card) return null;
+  if (kind === 'choice') { const r = card.querySelector('input[type=radio]:checked'); return r ? r.value : null; }
+  if (kind === 'match') return meta.left.map(left => {
+      const sel = card.querySelector(`select.divAnswersModel_${left}`) ||
+                  [...card.querySelectorAll('select')].find(s => s.dataset.secqid === left);
+      return sel ? sel.value : null; });
+  if (kind === 'order') { const ul = card.querySelector('ul.ui-sortable, ul.divSoratble');
+      return ul ? [...ul.querySelectorAll('li[data-id]')].map(li => li.dataset.id) : null; }
+  return null;
+}
+"""
+
+
+def _wanted(q: Question, a: Answer):
+    if q.kind == "choice":
+        return q.meta["values"][a.choice - 1]
+    if q.kind == "match":
+        return [q.meta["right"][x - 1] for x in a.seq]
+    if q.kind == "order":
+        return [q.meta["ids"][x - 1] for x in a.seq]
+    return None
+
+
+def mismatches(page, questions: list[Question], answers: list[Answer]) -> list[str]:
+    by_id = {a.qid: a for a in answers}
+    bad = []
+    for q in questions:
+        a = by_id.get(q.id)
+        if q.kind == "unknown" or not a:
+            continue
+        if page.evaluate(_READ_JS, [q.kind, q.meta]) != _wanted(q, a):
+            bad.append(q.id)
+    return bad
+
+
 SUBMIT_TEXTS = ("حفظ وإنهاء", "إنهاء", "تسليم", "حفظ")
 
 
@@ -171,6 +211,14 @@ def fill_and_submit(page, questions: list[Question], answers: list[Answer], allo
     if left_out:
         raise ScrapeError(f"فيه {len(left_out)} سؤال ما عندي له إجابة، حلّه بنفسك وسلّم",
                           f"{len(left_out)} questions without an answer")
+    bad = mismatches(page, questions, answers)
+    if bad:                                    # one more go for just those, then refuse
+        fill(page, [q for q in questions if q.id in bad], answers)
+        bad = mismatches(page, questions, answers)
+    if bad:
+        _snapshot(page, "not_matching")
+        raise ScrapeError(f"{len(bad)} إجابة ما ثبتت في الصفحة، ما سلّمت عشان ما ينحسب غلط",
+                          f"{len(bad)} answers did not stay on the page, not submitted")
     btn = page.locator("button[id^='Butto'], button[onclick*='Solve']").first
     if btn.count() == 0:
         for t in SUBMIT_TEXTS:

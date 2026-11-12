@@ -37,19 +37,32 @@ def check_account(db: DB, acct: str, notifier, admin_notify, fetch=None, finishe
         if scraper.RELOGGED.pop(str(profile_dir(acct).resolve()), None):
             db.log(acct, "🔑 جدد الدخول للمنصة لحاله")
             print(f"{acct}: logged in again automatically", flush=True)
-        exams = parse_exams(e_html)
+        assigns = _unique(parse_assignments(a_html))
+        exams = _unique(parse_exams(e_html))
+        _layout_check(acct, "الواجبات", a_html, assigns)
+        _layout_check(acct, "الاختبارات", e_html, exams)
         fin = scraper.finished_ids(rest[0] if rest else "")
-        for x in exams:                       # solved exam still shown in 'Current' but listed in 'Completed'
-            if x.id in fin and ("exam", x.id) not in db.done_keys(acct):
-                db.mark_done(acct, "exam", x.id, datetime.now(RIYADH))
-                db.log(acct, f"اختبار انحل (من المكتملة): {x.title} ✅")
-        items = parse_assignments(a_html) + exams
+        done = db.done_keys(acct)
+        hide = [x for x in exams if x.id in fin and ("exam", x.id) not in done]
+        if len(hide) > max(2, len([x for x in exams if x.is_open]) // 2):
+            # far more "solved" exams at once than is believable: trust nothing from that page
+            if db.get_meta(f"finwarn:{acct}") != str(len(hide)):
+                db.set_meta(f"finwarn:{acct}", str(len(hide)))
+                db.log(acct, f"المكتملة تقول {len(hide)} اختبار انحلت مرة وحدة، ما صدّقتها 🤔")
+            hide = []
+        for x in hide:                        # solved exam still shown in 'Current' but listed in 'Completed'
+            db.mark_done(acct, "exam", x.id, datetime.now(RIYADH))
+            db.log(acct, f"اختبار انحل (من المكتملة): {x.title} ✅")
+        items = assigns + exams
         run_cycle(db, acct, items, notifier)
+        db.set_meta(f"last_ok:{acct}", datetime.now(RIYADH).strftime("%m-%d %H:%M"))
         if db.get_meta(f"err:{acct}"):
             admin_notify(f"{acct}: رجع يشتغل ✅")
             db.log(acct, "رجع يشتغل ✅")
             db.set_meta(f"err:{acct}", "")
         return f"{acct}: {len(items)} items"
+    except scraper.NetworkDown as e:
+        return f"{acct}: ERROR - {e.en}"         # one message for the whole outage, from the loop
     except scraper.PapayaError as e:
         if db.get_meta(f"err:{acct}") != e.ar:
             db.set_meta(f"err:{acct}", e.ar)
@@ -58,6 +71,28 @@ def check_account(db: DB, acct: str, notifier, admin_notify, fetch=None, finishe
             admin_notify(f"{acct}: {e.ar} ⚠️{hint}")
             db.log(acct, f"{e.ar} ⚠️")
         return f"{acct}: ERROR - {e.en}"
+
+
+def _unique(items: list) -> list:
+    seen, out = set(), []
+    for i in items:
+        if (i.kind, i.id) not in seen:
+            seen.add((i.kind, i.id)); out.append(i)
+    return out
+
+
+def _layout_check(acct: str, what: str, html: str, items: list):
+    """Cards on the page but none could be read = the platform changed its layout.
+    Stop instead of silently showing 'nothing due', and keep the page for fixing."""
+    if items or not html or html.count("dga-defualt-card") == 0:
+        return
+    try:
+        d = HOME / "diagnose"; d.mkdir(parents=True, exist_ok=True)
+        (d / f"layout_{acct}.html").write_text(html, encoding="utf-8")
+    except OSError:
+        pass
+    raise scraper.ScrapeError(f"شكل صفحة {what} في المنصة تغيّر وما قدرت أقرا المواعيد",
+                              f"page layout changed ({what}), saved diagnose/layout_{acct}.html")
 
 
 def _token() -> str:
@@ -113,7 +148,8 @@ def make_solver(db_path: str, token: str) -> SolveService:
     from . import assignment_page
     assignment_page.SCREENSHOT_DIR = str(HOME / "diagnose")
     return SolveService(db_factory=lambda: DB(db_path), notifier=TelegramNotifier(token, _log_sent(db_path)),
-                        admin_id_fn=admin_id, profile_dir_fn=profile_dir, verify_fn=_still_open(db_path))
+                        admin_id_fn=admin_id, profile_dir_fn=profile_dir, verify_fn=_still_open(db_path),
+                        on_change=lambda acct: Bot(Api(token), DB(db_path), admin_id(), accounts()).update_live_list(acct))
 
 
 def _interval(night_min: int) -> float:
@@ -151,6 +187,29 @@ def heartbeat(db: DB, anotify, now: datetime | None = None) -> bool:
     return True
 
 
+def network_gate(db: DB, anotify, check=None, now: datetime | None = None) -> bool:
+    """True when there is internet. One message for a whole outage, sent when it is back."""
+    now = now or datetime.now(RIYADH)
+    up = (check or scraper.net_ok)()
+    down = db.get_meta("net_down")
+    if not up:
+        if not down:
+            db.set_meta("net_down", now.isoformat(timespec="seconds"))
+            db.log(None, "🌐 انقطع النت")
+            print(now.strftime("%H:%M"), "no internet - waiting", flush=True)
+        return False
+    if down:
+        db.set_meta("net_down", "")
+        since = datetime.fromisoformat(down).astimezone(RIYADH)
+        gap = (now - since).total_seconds()
+        db.log(None, f"🌐 رجع النت (كان مقطوع {_fmt_gap(gap)})")
+        try:
+            anotify(f"🌐 النت كان مقطوع من {since:%H:%M} ({_fmt_gap(gap)})\nرجع، وأفحص كل الحسابات الحين ✅")
+        except Exception:
+            pass
+    return True
+
+
 def backup(db_path: str, now: datetime | None = None, keep: int = 7):
     """Once a day: a copy of the database (settings, log, stats). Keeps the last `keep` days."""
     import sqlite3
@@ -180,7 +239,13 @@ def cycle_loop(db_path: str, token: str, interval_min: int):
     anotify = _admin_notifier(token)
     solver = make_solver(db_path, token)
     heartbeat(db, anotify)                 # tells you if it was off since last time
+    live = Bot(Api(token), db, admin_id(), accounts())       # redraws each phone's 📋 list in place
     while True:
+        if not network_gate(db, anotify):
+            for _ in range(2):             # no internet: look again in 2 minutes, nothing else to do
+                time.sleep(60)
+                heartbeat(db, anotify)
+            continue
         for acct in accounts():
             try:
                 out = check_account(db, acct, notifier, anotify)
@@ -191,6 +256,10 @@ def cycle_loop(db_path: str, token: str, interval_min: int):
                     anotify(f"{acct}: خطأ في البرنامج ({type(e).__name__}) — الفحص مستمر لبقية الحسابات ⚠️")
             print(datetime.now(RIYADH).strftime("%H:%M"), out, flush=True)
             if "ERROR" not in out and "skipped" not in out:
+                try:
+                    live.update_live_list(acct)
+                except Exception:
+                    pass
                 try:
                     for r in solver.auto(acct):
                         print(datetime.now(RIYADH).strftime("%H:%M"), f"{acct}: auto-solver -> {r}", flush=True)
@@ -239,12 +308,21 @@ def main(argv=None):
         for k in ("assign", "exams"):
             print(f"   {k}: {scraper.mask(urls[k]) if k in urls else 'NOT SAVED'}")
         print("[ok] ready" if len(urls) == 2 else "[fail] both pages are needed - run login again")
+        chat = db.chat_id(acct)
+        if len(urls) == 2 and chat and os.environ.get("TELEGRAM_BOT_TOKEN"):
+            from .bot import guide, menu
+            n = TelegramNotifier(_token(), _log_sent(db_path))
+            if not db.get_meta(f"welcomed:{acct}"):         # first time: welcome + guide
+                if n.send(chat, guide(db.solver_enabled(acct)), menu(db.solver_enabled(acct))):
+                    db.set_meta(f"welcomed:{acct}", "1"); print("   sent the welcome guide to the phone")
+            elif found:
+                n.send(chat, "تم تجديد دخولك للمنصة، رجعت التنبيهات تشتغل ✅")
     elif cmd == "verify":
         acct = argv[1]
         db = DB(db_path)
         urls = json.loads(db.get_meta(f"urls:{acct}") or "{}")
         try:
-            a_html, e_html = scraper.fetch(profile_dir(acct), urls)
+            a_html, e_html, *_ = scraper.fetch(profile_dir(acct), urls)
         except scraper.PapayaError as e:
             sys.exit(f"[fail] {e.en}")
         now = datetime.now(RIYADH)
@@ -262,6 +340,7 @@ def main(argv=None):
             print(check_account(db, acct, TelegramNotifier(tok), _admin_notifier(tok)))
     elif cmd == "run":
         tok = _token()
+        DB(db_path).set_meta("started_at", datetime.now(RIYADH).isoformat(timespec="seconds"))
         interval = int(os.environ.get("PAPAYA_INTERVAL_MIN", "30"))
         threading.Thread(target=cycle_loop, args=(db_path, tok, interval), daemon=True).start()
         def refresh(acct: str) -> bool:

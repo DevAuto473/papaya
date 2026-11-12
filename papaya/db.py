@@ -107,6 +107,8 @@ class DB:
 
     def set_chat(self, name: str, chat_id: int):
         self.ensure_account(name)
+        # one phone = one account: a chat linked again moves, it is never shared by two accounts
+        self.con.execute("UPDATE accounts SET chat_id=NULL WHERE chat_id=? AND name<>?", (chat_id, name))
         self.con.execute("UPDATE accounts SET chat_id=? WHERE name=?", (chat_id, name))
         self.con.commit()
 

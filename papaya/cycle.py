@@ -22,6 +22,7 @@ def run_cycle(db: DB, account: str, items: list[Item], notifier, now: datetime |
     settings = db.get_settings(account)
 
     if baselined and in_quiet_hours(now, settings):
+        _prune(db, account, items)
         return 0                       # freeze state; everything pending fires after quiet hours
 
     done = db.done_keys(account)       # submitted (by the bot or by hand): no alerts, not in summaries
@@ -47,5 +48,15 @@ def run_cycle(db: DB, account: str, items: list[Item], notifier, now: datetime |
             failed.add((n.kind, n.item_id))
             failed.update((k, i) for k, i, _ in n.covers)
 
-    db.upsert_items(account, [i for i in items if (i.kind, i.id) not in failed], now)
+    kept = [i for i in items if (i.kind, i.id) not in failed]
+    db.upsert_items(account, kept, now)
+    _prune(db, account, kept)          # gone from the platform = gone from the list; a failed alert is retried
     return sent_n
+
+
+def _prune(db: DB, account: str, items: list[Item]):
+    """Drop what the platform stopped listing. An empty page while we knew several items is far more
+    likely a page that did not load than everything being done at once, so it is ignored."""
+    if not items and len(db.known(account)) > 3:
+        return
+    db.prune_items(account, {(i.kind, i.id) for i in items})

@@ -100,7 +100,7 @@ def preview_markup(item_id: str, url: str | None, all_agree: bool) -> dict:
 class SolveService:
     def __init__(self, db_factory, notifier, admin_id_fn, profile_dir_fn,
                  ask=None, page_runner=None, adapter=assignment_page, models=None, now_fn=None,
-                 verify_fn=None):
+                 verify_fn=None, on_change=None, confirm_after=120):
         self.db_factory = db_factory
         self.notifier = notifier
         self.admin_id_fn = admin_id_fn
@@ -113,6 +113,9 @@ class SolveService:
         self.now = now_fn or (lambda: datetime.now(RIYADH))
         # verify_fn(acct, item_id) -> True (no longer open = submitted) / False (still open) / None (unknown)
         self.verify_fn = verify_fn
+        self.on_change = on_change          # on_change(acct): redraw that phone's 📋 list
+        self.confirm_after = confirm_after  # seconds; look at the list again after a submit (None = no)
+        self.spawn_bg = lambda fn: threading.Thread(target=fn, daemon=True).start()
         self._busy: set = set()
         self._lock = threading.Lock()
         self._progress: dict = {}          # chat -> ids of "⏳ ..." messages to remove when done
@@ -255,9 +258,43 @@ class SolveService:
             return "failed", e.ar
         db.set_solution_status(acct, item_id, "submitted", self.now())
         db.log(acct, f"سلّم: {row['title']} 📤")
+        self._confirm_later(acct, dict(row))
         return "submitted", ""
 
     # ---- one assignment ----------------------------------------------------
+
+    def _confirm_later(self, acct, row):
+        """The page said 'saved'. A bit later, check the assignments list itself: only then is it
+        really done. If it is still open there, the student is told and it shows up again."""
+        if not self.verify_fn or self.confirm_after is None:
+            return
+        def run():
+            import time
+            for wait in (self.confirm_after, self.confirm_after * 3):
+                time.sleep(wait)
+                gone = self.verify_fn(acct, row["id"])
+                if gone is None:
+                    continue                      # could not look (no internet...): try once more
+                db = self.db_factory()
+                if gone:
+                    getattr(db, "log", lambda *a: None)(acct, f"✅ تأكدت من المنصة: {_short(row['title'], 50)} انسلّم")
+                else:
+                    db.set_solution_status(acct, row["id"], "failed", self.now())
+                    getattr(db, "log", lambda *a: None)(acct, f"⚠️ بعد التسليم المنصة لسه تعرض {_short(row['title'], 50)} مفتوح")
+                    chat = db.chat_id(acct)
+                    if chat:
+                        kb = {"inline_keyboard": [[{"text": "✍️ افتح الواجب", "url": row["solve_url"]}]]} \
+                            if row.get("solve_url") else None
+                        self._say(chat, f"⚠️ ضغطت تسليم على «{escape(row['title'])}» بس المنصة لسه تعرضه مفتوح.\n"
+                                        "افتحه وتأكد بنفسك 👇", kb)
+                if self.on_change:
+                    try:
+                        self.on_change(acct)
+                    except Exception:
+                        pass
+                return
+        self.spawn_bg(run)
+
     def prepare(self, acct: str, item_id: str, chat, auto: bool = False) -> str:
         db = self.db_factory()
         if not db.solver_enabled(acct):

@@ -34,6 +34,67 @@ class ScrapeError(PapayaError):
     pass
 
 
+class NetworkDown(ScrapeError):
+    """The laptop has no internet (or WSL lost DNS): nobody's fault, nothing to report per account."""
+    def __init__(self, detail: str = ""):
+        super().__init__("ما فيه نت", f"no internet ({detail})" if detail else "no internet")
+
+
+NET_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED", "ERR_CONNECTION_RESET",
+              "ERR_CONNECTION_REFUSED", "ERR_CONNECTION_TIMED_OUT", "ERR_TIMED_OUT", "ERR_ADDRESS_UNREACHABLE",
+              "ERR_NAME_RESOLUTION_FAILED", "ERR_PROXY_CONNECTION_FAILED")
+
+
+def net_ok(hosts=("schools.madrasati.sa", "api.telegram.org"), timeout: float = 5) -> bool:
+    """Can we resolve and reach the platform and Telegram right now?"""
+    import socket
+    for h in hosts:
+        try:
+            with socket.create_connection((h, 443), timeout=timeout):
+                pass
+        except OSError:
+            return False
+    return True
+
+
+class WrongAccount(PapayaError):
+    def __init__(self):
+        super().__init__("المتصفح فاتح حساب طالب ثاني غير حساب هذا الجهاز، وقفت عشان ما أخلط بين المستخدمين",
+                         "the browser is logged in to a different student - stopped so users are never mixed up")
+
+
+# ---- who is this? ---------------------------------------------------------------
+# Every Madrasati link carries the student's id (UId=...). The saved page addresses hold the
+# right one, so a page that shows a different student is refused before anything is read.
+_UID = re.compile(r"UId=([0-9A-Fa-f]{16,})")
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+BOUND = "papaya_account.txt"             # in each profile: the Microsoft account that belongs to it
+
+
+def check_identity(html: str, url: str):
+    want = _UID.search(url or "")
+    if not want:
+        return
+    seen = {u.upper() for u in _UID.findall(html or "")}
+    if seen and want.group(1).upper() not in seen:
+        raise WrongAccount()
+
+
+def bound_email(profile: Path) -> str:
+    try:
+        return (Path(profile) / BOUND).read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return ""
+
+
+def bind_email(profile: Path, email: str):
+    try:
+        Path(profile).mkdir(parents=True, exist_ok=True)
+        (Path(profile) / BOUND).write_text(email.strip().lower(), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # A browser profile can only be open once at a time: the periodic check and a solve
 # request for the same account must take turns.
 _PROFILE_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
@@ -100,6 +161,10 @@ def setup_manual(profile: Path, start_url: str = BASE, headless: bool = False,
     from playwright.sync_api import sync_playwright
     from .parser import parse_assignments, parse_exams
     found: dict = {}
+    try:
+        (Path(profile) / BOUND).unlink()  # a new manual login may be a new account: learn it again
+    except OSError:
+        pass
     with sync_playwright() as p:
         ctx = _ctx(p, profile, headless)
         try:
@@ -160,6 +225,7 @@ def _load(page, url: str, title: str) -> str:
         if page.locator(NAV_ANY).count() == 0:
             raise SessionExpired()
         raise ScrapeError(f"صفحة غير متوقعة: '{got}' بدل '{title}'", f"unexpected page (expected {url_kind(title)})")
+    check_identity(html, url)
     return html
 
 
@@ -192,8 +258,8 @@ def _click_first(page, selectors) -> bool:
     return False
 
 
-def _ms_step(page) -> str:
-    """One Microsoft screen. Returns what it did."""
+def _ms_step(page, expect: str = "", info: dict | None = None) -> str:
+    """One Microsoft screen. Returns what it did. Only ever picks this profile's own account."""
     if page.locator("input[name='passwd']:visible, input[type='password']:visible").count():
         raise NeedsPerson("password")
     if page.locator("input[name='otc']:visible, #idDiv_SAOTCC_Title:visible, #idDiv_SAOTCAS_Title:visible").count():
@@ -209,7 +275,27 @@ def _ms_step(page) -> str:
             pass
         if _click_first(page, ["#idSIButton9", "button[data-testid='primaryButton']", "input[type='submit']"]):
             return "kmsi"
-    # account picker: prefer the tile that says it is signed in
+    # account picker: pick by email, never a guess
+    try:
+        shown = {e.lower(): e for e in EMAIL.findall(page.locator("body").inner_text())}
+    except Exception:
+        shown = {}
+    emails = sorted(shown)
+    if emails:
+        if expect and expect not in emails:
+            raise NeedsPerson("other")
+        if not expect and len(emails) > 1:
+            raise NeedsPerson("several")
+        pick = expect or emails[0]
+        t = page.get_by_text(shown[pick], exact=False)
+        try:
+            if t.count():
+                t.first.click(timeout=5000)
+                if info is not None:
+                    info["email"] = pick
+                return "account"
+        except Exception:
+            pass
     for txt in ("مُسجل الدخول", "مسجل الدخول", "Signed in"):
         t = page.get_by_text(txt, exact=False)
         try:
@@ -243,7 +329,7 @@ def _madrasati_login_click(page) -> bool:
                                "a[href*='Login']", "a[href*='login']", "button:has-text('Login')"])
 
 
-def auto_login(page, target_url: str, steps: int = 12) -> bool:
+def auto_login(page, target_url: str, steps: int = 12, expect: str = "", info: dict | None = None) -> bool:
     """Walk the login screens by clicking only. True when the Madrasati page is back."""
     page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
     for _ in range(steps):
@@ -258,7 +344,7 @@ def auto_login(page, target_url: str, steps: int = 12) -> bool:
             if not _madrasati_login_click(page):
                 page.wait_for_timeout(2000)
         elif any(h in host for h in MS_HOSTS) or "microsoft" in host or "adfs" in host or "sts" in host:
-            _ms_step(page)
+            _ms_step(page, expect, info)
         else:
             page.wait_for_timeout(1000)
     return False
@@ -280,13 +366,16 @@ def _relogin(page, profile: Path, url: str, now: float) -> None:
     if now - _LAST_TRY.get(key, float("-inf")) < RETRY_EVERY:
         raise SessionExpired(*_LAST_WHY.get(key, ("", "")))
     _LAST_TRY[key] = now
+    expect, info = bound_email(profile), {}
     try:
-        ok = auto_login(page, url)
+        ok = auto_login(page, url, expect=expect, info=info)
     except NeedsPerson as e:
         _diagnose(profile, page, "relogin")
         why = {"password": ("مايكروسوفت يطلب الباسوورد", "Microsoft asks for the password"),
                "code": ("مايكروسوفت يطلب رمز تحقق", "Microsoft asks for a code"),
-               "email": ("مايكروسوفت نسي الحساب", "Microsoft forgot the account")}[str(e)]
+               "email": ("مايكروسوفت نسي الحساب", "Microsoft forgot the account"),
+               "other": ("مايكروسوفت فاتح حساب ثاني غير حساب هذا الجهاز", "Microsoft shows another account"),
+               "several": ("فيه أكثر من حساب في المتصفح وما أختار عشوائي", "several accounts, will not guess")}[str(e)]
     except Exception as e:
         _diagnose(profile, page, "relogin")
         why = ("ما قدرت أدخل لحالي", f"auto login failed: {type(e).__name__}")
@@ -298,7 +387,96 @@ def _relogin(page, profile: Path, url: str, now: float) -> None:
         _LAST_WHY[key] = why
         raise SessionExpired(*why)
     _LAST_TRY.pop(key, None); _LAST_WHY.pop(key, None)
+    if info.get("email") and not expect:
+        bind_email(profile, info["email"])  # first automatic login: remember whose profile this is
     RELOGGED[key] = now
+
+
+_PAGES = re.compile(r"صفحة\s*(\d+)\s*من\s*(\d+)")
+MAX_PAGES = 10
+
+
+def _all_pages(page, html: str) -> str:
+    """The list may be split into pages ("صفحة 1 من 3"). Walk them with the page's own 'next'
+    arrow and return all of them together. If a page will not turn, keep what we have."""
+    m = _PAGES.search(re.sub(r"<[^>]+>", " ", html))
+    if not m or int(m.group(2)) <= 1:
+        return html
+    parts, total = [html], min(int(m.group(2)), MAX_PAGES)
+    for k in range(2, total + 1):
+        try:
+            nxt = page.locator("ul.pagination li.page-item:last-child a.page-link").first
+            if not nxt.count():
+                break
+            nxt.click(timeout=8000)
+            got = None
+            for _ in range(30):                  # works whether the site reloads or redraws in place
+                page.wait_for_timeout(500)
+                try:
+                    h = page.content()
+                except Exception:
+                    continue
+                mm = _PAGES.search(re.sub(r"<[^>]+>", " ", h))
+                if mm and int(mm.group(1)) == k:
+                    got = h
+                    break
+            if got is None:
+                break
+            page.wait_for_timeout(400)
+            parts.append(page.content())
+        except Exception:
+            break
+    return "\n".join(parts)
+
+
+def _load_list(page, url: str, title: str) -> str:
+    return _all_pages(page, _load(page, url, title))
+
+
+# e-course ("المقررات الإلكترونية") lists live in their own tab next to the school ones
+ECOURSE = {"assign": "EsubjectAssignments", "exams": "EsubjectExams"}
+
+
+def _ecourse_url(page, kind: str, base_url: str) -> str:
+    path = ECOURSE[kind]
+    try:
+        a = page.locator(f"a[href*='/{path}']")
+        href = a.first.get_attribute("href") if a.count() else None
+    except Exception:
+        href = None
+    if href:
+        from urllib.parse import urlsplit
+        full = href if href.startswith("http") else BASE + "/" + href.lstrip("/")
+        if urlsplit(full).netloc == urlsplit(base_url).netloc:      # same site as the saved page only
+            return full
+    return re.sub(r"/(Assignments|Exams)\?", f"/{path}?", base_url, count=1)
+
+
+def _load_ecourse(page, kind: str, base_url: str) -> str:
+    """Best effort: '' when the tab is missing or does not load. Only lists, never an exam."""
+    from playwright.sync_api import TimeoutError as PWTimeout
+    url = _ecourse_url(page, kind, base_url)
+    if ECOURSE[kind] not in url:
+        return ""
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_selector(".mainTitlePage", timeout=20000)
+        try:
+            page.wait_for_selector("div.dga-defualt-card", timeout=6000)
+        except PWTimeout:
+            return ""                       # empty tab
+        page.wait_for_timeout(600)
+        html = page.content()
+        check_identity(html, url)
+        return _all_pages(page, html)
+    except WrongAccount:
+        raise
+    except Exception:
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        return ""
 
 
 def finished_ids(html: str) -> set:
@@ -341,17 +519,22 @@ def fetch(profile: Path, urls: dict, headless: bool = True, finished: bool = Tru
         try:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             try:
-                a = _load(page, urls["assign"], TITLES["assign"])
+                a = _load_list(page, urls["assign"], TITLES["assign"])
             except SessionExpired:
                 import time
                 _relogin(page, profile, urls["assign"], time.time())      # clicks through, or raises
-                a = _load(page, urls["assign"], TITLES["assign"])
-            e = _load(page, urls["exams"], TITLES["exams"])
-            return a, e, (_load_finished(page, urls["exams"]) if finished else "")
+                a = _load_list(page, urls["assign"], TITLES["assign"])
+            a_e = _load_ecourse(page, "assign", urls["assign"])
+            e = _load_list(page, urls["exams"], TITLES["exams"])
+            fin = _load_finished(page, urls["exams"]) if finished else ""
+            e_e = _load_ecourse(page, "exams", urls["exams"])
+            return "\n".join(x for x in (a, a_e) if x), "\n".join(x for x in (e, e_e) if x), fin
         except (SessionExpired, ScrapeError):
             raise
         except PWError as e:
             first = str(e).splitlines()[0][:120]
+            if any(k in first for k in NET_ERRORS):
+                raise NetworkDown(first)
             raise ScrapeError(f"خطأ متصفح: {first}", f"browser error: {first}")
         finally:
             ctx.close()
