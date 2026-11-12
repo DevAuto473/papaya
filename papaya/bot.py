@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from html import escape
@@ -17,15 +18,53 @@ from .parser import Item
 from .reminders import HORIZON_AR, digest, in_horizon, list_buttons, wanted
 
 
+class ApiError(Exception):
+    """Telegram answered with an error. str() carries Telegram's own reason (never the token)."""
+    def __init__(self, method: str, code: int, description: str, retry_after: int = 0):
+        super().__init__(f"{method}: HTTP {code} {description}".strip())
+        self.code, self.description, self.retry_after = code, description, retry_after
+
+
+def is_not_modified(e: Exception) -> bool:
+    return "not modified" in str(e)
+
+
+def is_network_error(e: Exception) -> bool:
+    return isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)) \
+        and not isinstance(e, urllib.error.HTTPError)
+
+
 class Api:
+    RETRIES = 2                    # extra tries for a request that never reached Telegram
+
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}/"
 
     def call(self, method: str, **params):
-        req = urllib.request.Request(self.base + method, json.dumps(params).encode(),
-                                     {"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=params.get("timeout", 0) + 20) as r:
-            return json.load(r)["result"]
+        body = json.dumps(params).encode()
+        for attempt in range(self.RETRIES + 1):
+            req = urllib.request.Request(self.base + method, body, {"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=params.get("timeout", 0) + 20) as r:
+                    return json.load(r)["result"]
+            except urllib.error.HTTPError as e:
+                try:
+                    data = json.load(e)
+                except Exception:
+                    data = {}
+                err = ApiError(method, e.code, str(data.get("description", "")),
+                               int((data.get("parameters") or {}).get("retry_after") or 0))
+                if attempt < self.RETRIES and (e.code == 429 or e.code >= 500):
+                    time.sleep(min(err.retry_after or 2 * (attempt + 1), 30))   # flood limit / Telegram hiccup
+                    continue
+                raise err from None
+            except urllib.error.URLError:
+                # connection / DNS / TLS-handshake failure: the request was never delivered, so a retry
+                # cannot duplicate a message. (A read timeout is NOT retried: it may have been delivered.)
+                if attempt < self.RETRIES and method != "getUpdates":
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
 
 
 def _is_list_msg(msg) -> bool:
@@ -127,6 +166,17 @@ SPIN = ("⏳", "⌛")
 
 
 
+def _spawn_safe(fn, *args):
+    """Run a button job in the background. A crash there is logged in one line instead of a
+    traceback, and never takes anything else down."""
+    def run():
+        try:
+            fn(*args)
+        except Exception as e:
+            print(f"background job {getattr(fn, '__name__', 'job')} failed: {type(e).__name__}: {e}", flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _sig(text, kb) -> str:
     import hashlib
     return hashlib.md5((text + json.dumps(kb or {}, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()[:12]
@@ -142,7 +192,7 @@ class Bot:
         self._signup: dict = {}           # chat -> answers so far. Memory only: the password never touches disk
         self.wipe_after = 3600            # seconds until the admin's copy of a password is deleted (None = never)
         self.solver = solver
-        self.spawn = spawn or (lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start())
+        self.spawn = spawn or _spawn_safe
         for n in account_names:
             db.ensure_account(n)
 
@@ -352,6 +402,23 @@ class Bot:
         rows = [[(n, f"link:{n}:{chat}")] for n in free] + [[("احذف البيانات 🗑", "wipe:-")]]
         res = self.api.call("sendMessage", chat_id=self.admin_id, text=text, parse_mode="HTML",
                             protect_content=True, reply_markup=kb(rows))
+        self._wipe_later(res)                    # the admin's copy of the password deletes itself
+        return self.say(chat, "تمام، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
+
+    def _wipe_later(self, res):
+        """Log the admin's message holding a password and delete it after `wipe_after` seconds."""
+        try:
+            mid = res["message_id"]
+        except (TypeError, KeyError):
+            return
+        try:
+            self.db.log_msg(self.admin_id, mid, datetime.now(RIYADH))
+        except Exception:
+            pass
+        if self.wipe_after:
+            t = threading.Timer(self.wipe_after, self._wipe, (self.admin_id, mid))
+            t.daemon = True
+            t.start()
 
     def _auto_signup_login(self, name, chat, tg, person, email, password):
         """Runs in a background thread. `password` exists only as this call's local
@@ -387,14 +454,7 @@ class Bot:
                                 f"سجّله يدويًا من اللابتوب:\n<code>python -m papaya.main login {escape(name)}</code>\n"
                                 f"وبعدها اربطه بالضغط هنا 👇",
                  kb([[(name, f"link:{name}:{chat}")], [("احذف البيانات 🗑", "wipe:-")]]))
-        try:
-            self.db.log_msg(self.admin_id, res["message_id"], datetime.now(RIYADH))
-            if self.wipe_after:
-                t = threading.Timer(self.wipe_after, self._wipe, (self.admin_id, res["message_id"]))
-                t.daemon = True; t.start()
-        except Exception:
-            pass
-        return self.say(chat, "تمام، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
+        return self.say(chat, "ما قدرت أسجّل دخولك تلقائيًا، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
 
     def _wipe(self, chat, mid):
         try:
@@ -409,17 +469,31 @@ class Bot:
                                                        solver=self.solver, spawn=self.spawn)
         stale = False
         if _t.time() - self._last_refresh.get(account, 0) > 60:      # at most once a minute
-            note = bot.say(chat, "أحدّث من المنصة… ثواني 🔄")
+            note = None
+            try:
+                note = bot.say(chat, "أحدّث من المنصة… ثواني 🔄")
+            except Exception:
+                pass                                 # the list itself still gets a try below
             try:
                 stale = not self.refresh(account)
             except Exception:
                 stale = True
-            self._last_refresh[account] = _t.time()
-            try:
-                self.api.call("deleteMessages", chat_id=chat, message_ids=[note["message_id"]])
+            if not stale:                            # a failed read may be retried right away
+                self._last_refresh[account] = _t.time()
+            if note:
+                try:
+                    self.api.call("deleteMessages", chat_id=chat, message_ids=[note["message_id"]])
+                except Exception:
+                    pass
+        try:
+            bot.on_list(chat, account, datetime.now(RIYADH), stale=stale)
+        except Exception as e:
+            print(f"{account}: /list could not be sent: {type(e).__name__}: {e}", flush=True)
+            try:                                     # one short retry so the tap is never just ignored
+                _t.sleep(3)
+                bot.on_list(chat, account, datetime.now(RIYADH), stale=stale)
             except Exception:
                 pass
-        bot.on_list(chat, account, datetime.now(RIYADH), stale=stale)
 
     def on_list(self, chat, account, now, stale: bool = False):
         t, kb = self.list_view(account, now, stale)
@@ -445,9 +519,13 @@ class Bot:
             self.api.call("editMessageText", chat_id=int(chat), message_id=int(mid), text=t, parse_mode="HTML",
                           disable_web_page_preview=True, reply_markup=kb or {"inline_keyboard": []})
         except Exception as e:
-            if "not modified" not in str(e):
-                self.db.set_meta(f"listmsg:{account}", "")      # deleted or too old: stop following it
+            if is_not_modified(e):
+                pass
+            elif isinstance(e, ApiError) and e.code in (400, 403):
+                self.db.set_meta(f"listmsg:{account}", "")      # deleted, too old, or bot blocked: stop following it
                 return False
+            else:
+                return False                    # network blip: keep following it, try again next check
         self.db.set_meta(f"listsig:{account}", sig)
         return True
 
@@ -735,7 +813,14 @@ class Bot:
             cur = getattr(self.db.get_settings(account), rest)
             self.db.set_setting(account, rest, 0 if cur else 1)
         t, m = settings_view(self.db, account)
-        self.api.call("editMessageText", chat_id=chat, message_id=mid, text=t, parse_mode="HTML", reply_markup=m)
+        try:
+            self.api.call("editMessageText", chat_id=chat, message_id=mid, text=t, parse_mode="HTML", reply_markup=m)
+        except Exception as e:
+            if is_not_modified(e):
+                return                          # tapped the option that was already chosen
+            if isinstance(e, ApiError) and e.code == 400:
+                return self.say(chat, t, m)     # the old settings message is gone: send a fresh one
+            raise
 
     def _then_refresh_view(self, fn, kind, msg):
         """Run a solve/submit job, then update the message it was started from, so what was just
@@ -831,5 +916,5 @@ class Bot:
             try:
                 self.handle(u)
             except Exception as e:             # never let one bad update kill the loop
-                print("handler error:", type(e).__name__, e)
+                print("handler error:", type(e).__name__, e, flush=True)
         return offset

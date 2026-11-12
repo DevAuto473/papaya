@@ -1,0 +1,86 @@
+{
+  "papaya/__init__.py": {
+    "mtime": 1793969879.8419764,
+    "seen": 1794507858.796308,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "papaya/ai.py": {
+    "mtime": 1793969879.9003448,
+    "seen": 1794507858.7963278,
+    "ast_hash": "47c6fe7562f78db9c9e76e6ee4220ef7",
+    "semantic_hash": "47c6fe7562f78db9c9e76e6ee4220ef7"
+  },
+  "papaya/assignment_page.py": {
+    "mtime": 1793969880.1104717,
+    "seen": 1794507858.7963367,
+    "ast_hash": "98b7ed0671289c26a6a6aaee25df3262",
+    "semantic_hash": "98b7ed0671289c26a6a6aaee25df3262"
+  },
+  "papaya/bot.py": {
+    "mtime": 1794507643.5709805,
+    "seen": 1794507858.7963424,
+    "ast_hash": "438cfe951bf028cf13254518daae9f51",
+    "semantic_hash": "438cfe951bf028cf13254518daae9f51"
+  },
+  "papaya/cycle.py": {
+    "mtime": 1793969880.526834,
+    "seen": 1794507858.7963464,
+    "ast_hash": "daf9b59f59425cf290edd18f42e72797",
+    "semantic_hash": "daf9b59f59425cf290edd18f42e72797"
+  },
+  "papaya/db.py": {
+    "mtime": 1793969880.624115,
+    "seen": 1794507858.79635,
+    "ast_hash": "cfd52e0f4e3a0ab1530104ca05b0bd0c",
+    "semantic_hash": "cfd52e0f4e3a0ab1530104ca05b0bd0c"
+  },
+  "papaya/env.py": {
+    "mtime": 1793969880.7175045,
+    "seen": 1794507858.796354,
+    "ast_hash": "48d1564714218ea998c2d3fc18591370",
+    "semantic_hash": "48d1564714218ea998c2d3fc18591370"
+  },
+  "papaya/main.py": {
+    "mtime": 1794507643.5749824,
+    "seen": 1794507858.7963574,
+    "ast_hash": "1531f1149aa7b1cfd1fe6daa80cdee95",
+    "semantic_hash": "1531f1149aa7b1cfd1fe6daa80cdee95"
+  },
+  "papaya/notifier.py": {
+    "mtime": 1793969881.036586,
+    "seen": 1794507858.7963605,
+    "ast_hash": "6b98aa45808ffb032cb8b526a46456e9",
+    "semantic_hash": "6b98aa45808ffb032cb8b526a46456e9"
+  },
+  "papaya/parser.py": {
+    "mtime": 1793969881.1572144,
+    "seen": 1794507858.7963636,
+    "ast_hash": "911eb725fd9c5b152f546548e8bd355c",
+    "semantic_hash": "911eb725fd9c5b152f546548e8bd355c"
+  },
+  "papaya/reminders.py": {
+    "mtime": 1793969881.2544954,
+    "seen": 1794507858.796366,
+    "ast_hash": "dcb10dbb4a81c64975ecf318f1b37719",
+    "semantic_hash": "dcb10dbb4a81c64975ecf318f1b37719"
+  },
+  "papaya/scraper.py": {
+    "mtime": 1794507643.5749824,
+    "seen": 1794507858.7963693,
+    "ast_hash": "e84f9bb3ece5a4529b8d3093077fd16c",
+    "semantic_hash": "e84f9bb3ece5a4529b8d3093077fd16c"
+  },
+  "papaya/service.py": {
+    "mtime": 1793969881.5346644,
+    "seen": 1794507858.7963724,
+    "ast_hash": "401e0bc75f4bff56a98ae89ef7ce5238",
+    "semantic_hash": "401e0bc75f4bff56a98ae89ef7ce5238"
+  },
+  "papaya/solver.py": {
+    "mtime": 1793969881.70977,
+    "seen": 1794507858.7963755,
+    "ast_hash": "4643c66df48b3ad0a23f1d848533c490",
+    "semantic_hash": "4643c66df48b3ad0a23f1d848533c490"
+  }
+}

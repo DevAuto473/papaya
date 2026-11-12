@@ -26,15 +26,26 @@ def mk():
 
 
 def test_link_flow_admin_approves():
-    api, db, bot = mk()
-    bot.handle(msg(KID, "/start"))
+    import threading
+    api, db, bot = mk()                                  # no profile_dir: the form goes to the admin
+    api.call = lambda m, **p: api.calls.append((m, p)) or {"message_id": 42}
+    timers = []
+    real_timer = threading.Timer
+    threading.Timer = lambda *a, **k: timers.append(a) or real_timer(9999, lambda: None)
+    try:
+        for t in ("/start", "Sara", "0501234567", "sara@example.com", "secret123"):
+            bot.handle(msg(KID, t))
+    finally:
+        threading.Timer = real_timer
     req = api.sent(ADMIN)[-1]
     assert "link:papaya02:222" in str(req["reply_markup"])
+    assert timers and timers[0][0] == bot.wipe_after     # the admin's copy of the password deletes itself
+    assert "وصلت بياناتك" in api.sent(KID)[-1]["text"]  # the student is told it arrived
     bot.handle(cb(KID, "link:papaya01:222"))            # non-admin tapping: ignored
     assert db.chat_id("papaya01") is None
     bot.handle(cb(ADMIN, "link:papaya01:222"))
     assert db.chat_id("papaya01") == KID
-    assert "papaya01" in api.sent(KID)[-1]["text"]
+    assert "المشرف قبلك" in api.sent(KID)[-1]["text"]         # told the next step (login on the laptop)
 
 
 def test_signup_auto_login_success(monkeypatch):
@@ -100,3 +111,42 @@ def test_bad_args_and_list():
     run_cycle(db, "papaya01", parse_assignments(A) + parse_exams(E), R(), now)
     bot.handle(msg(KID, "/list"), now); 
     assert "الواجبات والاختبارات" in api.sent(KID)[-1]["text"]
+
+
+class FailingApi(FakeApi):
+    """Fails chosen methods with a given exception."""
+    def __init__(self, fail): super().__init__(); self.fail = fail
+    def call(self, m, **p):
+        self.calls.append((m, p))
+        if m in self.fail:
+            raise self.fail[m]
+        return {"message_id": 9}
+
+
+def test_live_list_survives_a_network_blip():
+    import urllib.error
+    from papaya.bot import ApiError
+    api = FailingApi({"editMessageText": urllib.error.URLError("reset")}); db = DB(":memory:")
+    bot = Bot(api, db, ADMIN, ["papaya01"]); db.set_chat("papaya01", KID)
+    db.set_meta("listmsg:papaya01", f"{KID}:7"); db.set_meta("listsig:papaya01", "old")
+    assert bot.update_live_list("papaya01") is False
+    assert db.get_meta("listmsg:papaya01") == f"{KID}:7"        # still followed after a blip
+    api.fail["editMessageText"] = ApiError("editMessageText", 400, "Bad Request: message to edit not found")
+    bot.update_live_list("papaya01")
+    assert db.get_meta("listmsg:papaya01") == ""                 # really gone: stop following
+
+
+def test_settings_tap_on_same_option_is_quiet():
+    from papaya.bot import ApiError
+    api = FailingApi({"editMessageText": ApiError("editMessageText", 400, "Bad Request: message is not modified")})
+    db = DB(":memory:"); bot = Bot(api, db, ADMIN, ["papaya01"]); db.set_chat("papaya01", KID)
+    bot.handle(cb(KID, "r:10"))                                  # no exception, no extra message
+    assert not api.sent(KID)
+
+
+def test_list_tap_never_crashes_the_thread():
+    import urllib.error
+    api = FailingApi({"sendMessage": urllib.error.URLError("reset")}); db = DB(":memory:")
+    bot = Bot(api, db, ADMIN, ["papaya01"], refresh=lambda a: False, spawn=lambda fn, *a: fn(*a))
+    db.set_chat("papaya01", KID)
+    bot.handle(msg(KID, "/list"))                                # Telegram unreachable: must not raise

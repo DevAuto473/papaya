@@ -52,7 +52,7 @@ def test_far_item_is_silent_until_it_enters_the_window():
     far = fresh(its[2], id="FAR", title="واجب بعيد", deadline=T(9, 12))
     run_cycle(db, "papaya01", its + [far], r, T(4, 15, 0))
     assert not any("واجب بعيد" in m for m in r.msgs)
-    run_cycle(db, "papaya01", its + [far], r, T(8, 9, 0))   # now 'tomorrow'
+    run_cycle(db, "papaya01", its + [far], r, T(8, 13, 0))  # now inside the next 24 hours
     assert ("assignment", "FAR", "new") in db.sent_events("papaya01") and r.msgs
 
 
@@ -90,7 +90,7 @@ def test_failed_send_retries():
 def test_many_at_once_is_one_grouped_message():
     db, r = mk(), Rec(); its = items()
     run_cycle(db, "papaya01", its, r, T(4, 13, 0)); r.msgs.clear()
-    burst = [fresh(its[2], id=f"B{n}", deadline=T(5, 20)) for n in range(5)]
+    burst = [fresh(its[2], id=f"B{n}", deadline=T(5, 10)) for n in range(5)]   # inside 24h, outside the 10h reminder
     run_cycle(db, "papaya01", its + burst, r, T(4, 15, 0))
     assert sum("مواعيد قريبة" in m for m in r.msgs) == 1 and not any("جديد 🆕" in m for m in r.msgs)
     r.msgs.clear(); run_cycle(db, "papaya01", its + burst, r, T(4, 15, 30))
@@ -119,7 +119,7 @@ def test_old_database_is_upgraded(tmp_path):
       notify_remind INTEGER NOT NULL DEFAULT 1, notify_opened INTEGER NOT NULL DEFAULT 1, remind_external INTEGER NOT NULL DEFAULT 1);
       INSERT INTO settings(account) VALUES('papaya01');""")
     con.commit(); con.close()
-    assert DB(path).get_settings("papaya01").horizon_days == 2
+    assert DB(path).get_settings("papaya01").horizon_days == 1          # old 2-day default moved to 24 hours
 
 
 def test_single_reminder_keeps_its_own_button():

@@ -354,14 +354,30 @@ def main(argv=None):
         bot.set_commands()
         print("papaya is running. Ctrl+C to stop.", flush=True)
         offset = None
+        fails = 0                                 # consecutive polling failures -> back off gently
         while True:
             try:
                 offset = bot.poll_once(offset)
+                if fails >= 3:
+                    print(datetime.now(RIYADH).strftime("%H:%M"), f"telegram reachable again after {fails} failed polls",
+                          flush=True)
+                fails = 0
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print("poll error:", type(e).__name__, flush=True)
-                time.sleep(5)
+                fails += 1
+                code = getattr(e, "code", None)
+                if code == 409:
+                    reason = "another copy of the bot is running with the same token - stop it"
+                elif code == 401:
+                    reason = "TELEGRAM_BOT_TOKEN was rejected - check .env"
+                else:
+                    reason = str(getattr(e, "reason", "") or e)[:120]
+                # one line per outage instead of one per try: print the 1st, then every 10th
+                if fails == 1 or fails % 10 == 0:
+                    print(datetime.now(RIYADH).strftime("%H:%M"), f"poll error #{fails}: {type(e).__name__}: {reason}",
+                          flush=True)
+                time.sleep(min(5 * fails, 60))
     else:
         sys.exit("commands: login <acct> | verify <acct> | check | run")
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
 import urllib.request
 
 
@@ -26,13 +28,30 @@ class TelegramNotifier:
         if markup:
             payload["reply_markup"] = markup
         body = json.dumps(payload).encode()
-        req = urllib.request.Request(self.url, body, {"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                ok = r.status == 200
-                data = json.load(r) if ok else {}
-        except Exception:
-            return False   # token never printed; caller records failure
+        ok, data = False, {}
+        for attempt in range(3):
+            req = urllib.request.Request(self.url, body, {"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    ok = r.status == 200
+                    data = json.load(r) if ok else {}
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 2:          # Telegram flood limit: wait as told, then retry
+                    try:
+                        wait = int((json.load(e).get("parameters") or {}).get("retry_after") or 3)
+                    except Exception:
+                        wait = 3
+                    time.sleep(min(wait, 30))
+                    continue
+                return False
+            except urllib.error.URLError:
+                if attempt < 2:                             # never reached Telegram: safe to retry
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                return False
+            except Exception:
+                return False   # token never printed; caller records failure and retries next cycle
         if not ok:
             return False
         mid = (data.get("result") or {}).get("message_id") or True

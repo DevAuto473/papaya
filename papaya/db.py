@@ -79,8 +79,17 @@ class Settings:
 
 class DB:
     def __init__(self, path: str | Path = "papaya.db"):
-        self.con = sqlite3.connect(str(path))
+        # The bot, the check loop and button jobs each run in their own thread. Allow a connection to be
+        # used from another thread (instead of failing silently) and wait for a busy database instead of
+        # raising 'database is locked'.
+        self.con = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
+        self.con.execute("PRAGMA busy_timeout=30000")
+        if str(path) != ":memory:":
+            try:
+                self.con.execute("PRAGMA journal_mode=WAL")     # readers never block the writer
+            except sqlite3.Error:
+                pass
         self.con.executescript(SCHEMA)
         # upgrade older databases in place
         self._add_column("settings", "horizon_days", "INTEGER NOT NULL DEFAULT 2")
