@@ -84,6 +84,37 @@ def test_signup_auto_login_failure_frees_the_slot_and_falls_back(monkeypatch):
     assert "papaya01" in admin_texts and "login papaya01" in admin_texts
 
 
+def test_admin_can_change_a_devices_settings():
+    api, db, bot = mk(); db.set_chat("papaya01", KID)
+    bot.handle(cb(ADMIN, "adm:dev:papaya01"))
+    bot.handle(cb(ADMIN, "adm:aset:papaya01:h:1"))
+    assert db.get_settings("papaya01").horizon_days == 1
+    assert "adm:dev:papaya01" in str(api.calls[-1][1]["reply_markup"])  # back button goes to the device page
+    bot.handle(cb(ADMIN, "adm:aset:papaya01:t:notify_new"))
+    assert db.get_settings("papaya01").notify_new is False
+    bot.handle(cb(KID, "adm:aset:papaya01:h:7"))          # the device's own owner is not the admin: ignored
+    assert db.get_settings("papaya01").horizon_days == 1
+
+
+def test_admin_can_solve_all_for_a_device():
+    calls = []
+
+    class FakeSolver:
+        def solve_all(self, acct, arg, chat):
+            calls.append(("solve_all", acct, chat))
+        def submit_all(self, acct, arg, chat):
+            calls.append(("submit_all", acct, chat))
+    api, db, bot = mk(); db.set_chat("papaya01", KID); db.set_solver("papaya01", True)
+    bot.solver = FakeSolver(); bot.spawn = lambda fn, *a: fn(*a)
+    bot.handle(cb(ADMIN, "adm:solveall:papaya01"))
+    assert calls == [("solve_all", "papaya01", ADMIN)]
+    bot.handle(cb(ADMIN, "adm:submitall:papaya01"))
+    assert calls[-1] == ("submit_all", "papaya01", ADMIN)
+    db.set_solver("papaya01", False)
+    bot.handle(cb(ADMIN, "adm:solveall:papaya01"))        # solve privilege off: no-op
+    assert len(calls) == 2
+
+
 def test_settings_roundtrip():
     api, db, bot = mk(); db.set_chat("papaya01", KID)
     bot.handle(cb(KID, "r:6")); bot.handle(cb(KID, "q:0:7")); bot.handle(cb(KID, "t:notify_new"))
