@@ -263,3 +263,24 @@ def test_admin_acts_as_a_device_owner():
     assert len(calls) == 1                                       # back on my own (no solver): nothing
     bot.handle(cb(KID, "adm:as:papaya01"))                       # only the admin can do this
     assert bot._account(KID) == "papaya02"
+
+
+def test_timed_solve_permission_runs_out():
+    from datetime import timedelta
+    from papaya.bot import parse_duration, duration_ar
+    assert parse_duration("3d") == 72 and parse_duration("12h") == 12 and parse_duration("2w") == 336
+    assert parse_duration("") == 0 and parse_duration("abc") is None and duration_ar(72) == "3 أيام"
+    api, db, bot = mk(); db.set_chat("papaya02", KID)
+    bot.handle(cb(ADMIN, "adm:sol:papaya02"))                  # off -> opens the duration picker
+    assert "adm:solt:papaya02:72" in str(api.calls[-1][1].get("reply_markup"))
+    bot.handle(cb(ADMIN, "adm:solt:papaya02:72"))
+    assert db.solver_enabled("papaya02")
+    assert "صار عندك ميزة الحل" in api.sent(KID)[-1]["text"]
+    later = datetime.now(RIYADH) + timedelta(hours=73)
+    assert not db.solver_enabled("papaya02", later)           # 3 days later: gone by itself
+    bot.expire_check(later)
+    assert "انتهت" in api.sent(KID)[-1]["text"] and "انتهت" in api.sent(ADMIN)[-1]["text"]
+    n = len(api.sent(KID)); bot.expire_check(later)
+    assert len(api.sent(KID)) == n                              # announced only once
+    bot.handle(msg(ADMIN, "/grant papaya02"))                   # no duration: permanent
+    assert db.solver_enabled("papaya02", later + timedelta(days=400))

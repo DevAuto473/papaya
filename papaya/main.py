@@ -252,6 +252,10 @@ def cycle_loop(db_path: str, token: str, interval_min: int):
                 time.sleep(60)
                 heartbeat(db, anotify)
             continue
+        try:
+            live.expire_check()            # timed solve permissions that ran out
+        except Exception as e:
+            print("expire check:", type(e).__name__, flush=True)
         for acct in all_accounts(db):
             try:
                 out = check_account(db, acct, notifier, anotify)
@@ -346,6 +350,10 @@ def main(argv=None):
         print("(nothing was sent to Telegram)")
     elif cmd == "check":
         db = DB(db_path); tok = _token()
+        try:
+            Bot(Api(tok), db, admin_id(), accounts()).expire_check()
+        except Exception as e:
+            print("expire check:", type(e).__name__)
         for acct in all_accounts(db):
             print(check_account(db, acct, TelegramNotifier(tok), _admin_notifier(tok)))
     elif cmd == "run":

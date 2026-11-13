@@ -219,15 +219,38 @@ class DB:
         return r["v"] if r else default
 
     # solver permission (admin-controlled) -------------------------------
-    def solver_enabled(self, name: str) -> bool:
+    def solver_enabled(self, name: str, now: datetime | None = None) -> bool:
         r = self.con.execute("SELECT solver FROM accounts WHERE name=?", (name,)).fetchone()
-        return bool(r and r["solver"])
+        if not (r and r["solver"]):
+            return False
+        until = self.solver_until(name)
+        if until and (now or datetime.now(RIYADH)) >= until:     # a timed grant ran out: switch it off now
+            self.con.execute("UPDATE accounts SET solver=0 WHERE name=?", (name,))
+            self.con.commit()
+            self.set_meta(f"solver_until:{name}", "")
+            self.set_meta(f"solver_expired:{name}", "1")       # the check loop tells the owner and the admin
+            return False
+        return True
 
-    def set_solver(self, name: str, on: bool):
+    def solver_until(self, name: str):
+        v = self.get_meta(f"solver_until:{name}")
+        return datetime.fromisoformat(v) if v else None
+
+    def take_expired_solver(self, name: str) -> bool:
+        """True once, right after a timed grant ran out (so it is announced only one time)."""
+        if self.get_meta(f"solver_expired:{name}") == "1":
+            self.set_meta(f"solver_expired:{name}", "")
+            return True
+        return False
+
+    def set_solver(self, name: str, on: bool, until: datetime | None = None):
+        """until=None: permanent. A new grant replaces the old end time (that's how you extend)."""
         self.ensure_account(name)
         was = self.solver_enabled(name)
         self.con.execute("UPDATE accounts SET solver=? WHERE name=?", (1 if on else 0, name))
         self.con.commit()
+        self.set_meta(f"solver_until:{name}", until.isoformat() if (on and until) else "")
+        self.set_meta(f"solver_expired:{name}", "")
         if on and not was:                 # a new VIP starts with auto-solve ON (they can switch it off in settings)
             self.set_setting(name, "auto_solve", 1)
 

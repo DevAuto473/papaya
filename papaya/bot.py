@@ -8,14 +8,14 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 
 from . import scraper
 from .db import DB
 from .parser import RIYADH
 from .parser import Item
-from .reminders import HORIZON_AR, digest, in_horizon, list_buttons, wanted
+from .reminders import HORIZON_AR, digest, fmt_left, in_horizon, list_buttons, wanted
 
 
 class ApiError(Exception):
@@ -85,7 +85,7 @@ HELP = (
     "اختفت الأزرار؟ أرسل /start"
 )
 ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\n/as papaya02 — استخدم البوت كأنك صاحب الجهاز 👤 (/me للرجوع)\n/talk papaya02 — تكلّم مع صاحب الجهاز باسم البوت 💬 (/done للإنهاء)\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
-              "/grant papaya01 — إعطاء ميزة الحل\n/revoke papaya01 — سحب ميزة الحل")
+              "/grant papaya01 3d — إعطاء ميزة الحل لمدة (12h, 3d, 2w — بدون مدة = دائم)\n/revoke papaya01 — سحب ميزة الحل")
 SOLVER_HELP = "\n<b>حل كل الواجبات</b> — أو اضغط 🆘 جنب أي واجب في «الواجبات والاختبارات» 🆘"
 
 GUIDE = (
@@ -175,6 +175,33 @@ def _spawn_safe(fn, *args):
         except Exception as e:
             print(f"background job {getattr(fn, '__name__', 'job')} failed: {type(e).__name__}: {e}", flush=True)
     threading.Thread(target=run, daemon=True).start()
+
+
+def parse_duration(t: str):
+    """'3d' / '12h' / '2w' / '3' (days) -> hours. 0 = permanent. None if it can't be read."""
+    t = (t or "").strip().lower()
+    if t in ("", "0", "دائم", "forever"):
+        return 0
+    unit = {"h": 1, "d": 24, "w": 168, "m": 720}.get(t[-1])
+    num = t[:-1] if unit else t
+    try:
+        n = float(num)
+    except ValueError:
+        return None
+    h = int(round(n * (unit or 24)))
+    return h if 0 < h <= 24 * 366 else None
+
+
+def duration_ar(hours: int) -> str:
+    if not hours:
+        return "دائمة"
+    if hours % 720 == 0:
+        return f"{hours // 720} شهر"
+    if hours % 168 == 0:
+        return "أسبوع" if hours == 168 else f"{hours // 168} أسابيع"
+    if hours % 24 == 0:
+        return "يوم" if hours == 24 else f"{hours // 24} أيام"
+    return f"{hours} ساعة"
 
 
 def _sig(text, kb) -> str:
@@ -290,14 +317,14 @@ class Bot:
         if is_admin and cmd in ("/grant", "/revoke"):
             if not args or args[0] not in self.names:
                 return self.say(chat, f"اكتب اسم جهاز موجود: {', '.join(self.names)}")
-            on = cmd == "/grant"
-            self.db.set_solver(args[0], on)
-            self.db.log(args[0], "أعطيت ميزة الحل 🆘" if on else "سحبت ميزة الحل 🚫")
-            self.set_commands()
-            target = self.db.chat_id(args[0])
-            if target:                            # refresh their buttons: the solve button appears/disappears
-                self.say(target, "تم تحديث القائمة ✅" if on else "تم تحديث القائمة", menu(on))
-            return self.say(chat, f"{'أعطيت' if on else 'سحبت'} ميزة الحل {'لـ' if on else 'من'} {escape(args[0])} {'✅' if on else '🚫'}")
+            if cmd == "/revoke":
+                self.revoke_solver(args[0])
+                return self.say(chat, f"سحبت ميزة الحل من {escape(args[0])} 🚫")
+            hours = parse_duration(args[1]) if len(args) > 1 else 0
+            if hours is None:
+                return self.say(chat, "المدة مثل: <code>/grant papaya02 3d</code> (3 أيام) أو 12h أو 2w — وبدون مدة = دائم")
+            self.grant_solver(args[0], hours)
+            return self.say(chat, f"أعطيت ميزة الحل لـ {escape(args[0])} — {duration_ar(hours)} ✅")
         if is_admin and cmd == "/name":
             if len(args) < 2 or args[0] not in self.names:
                 return self.say(chat, "مثال: /name papaya03 أختي")
@@ -481,6 +508,47 @@ class Bot:
                                 f"وبعدها اربطه بالضغط هنا 👇",
                  kb([[(name, f"link:{name}:{chat}")], [("احذف البيانات 🗑", "wipe:-")]]))
         return self.say(chat, "ما قدرت أسجّل دخولك تلقائيًا، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
+
+    # ---- solve permission, permanent or for a while -----------------------
+    def _solver_line(self, name: str, now) -> str:
+        if not self.db.solver_enabled(name, now):
+            return "مقفلة"
+        until = self.db.solver_until(name)
+        return "مفعّلة 🆘 · دائمة" if not until else f"مفعّلة 🆘 · باقي {fmt_left(until - now)}"
+
+    def grant_solver(self, name: str, hours: int = 0):
+        """hours=0: permanent. Granting again replaces the end time (extends or shortens it)."""
+        until = datetime.now(RIYADH) + timedelta(hours=hours) if hours else None
+        self.db.set_solver(name, True, until)
+        self.db.log(name, f"أعطيت ميزة الحل — {duration_ar(hours)} 🆘")
+        self.set_commands()
+        target = self.db.chat_id(name)
+        if target:
+            self.say(target, "صار عندك ميزة الحل 🆘" + (f" لمدة {duration_ar(hours)}" if hours else "")
+                     + "\nزر 🆘 جنب الواجب يحله لك.", menu(True))
+
+    def revoke_solver(self, name: str):
+        self.db.set_solver(name, False)
+        self.db.log(name, "سحبت ميزة الحل 🚫")
+        self.set_commands()
+        target = self.db.chat_id(name)
+        if target:
+            self.say(target, "تم تحديث القائمة", menu(False))
+
+    def expire_check(self, now=None):
+        """Called by the check loop: turn off timed grants that ran out, and say so once."""
+        now = now or datetime.now(RIYADH)
+        for name in self.names:
+            self.db.solver_enabled(name, now)          # switches it off if its time is up
+            if self.db.take_expired_solver(name):
+                self.db.log(name, "انتهت مدة ميزة الحل ⏰")
+                self.set_commands()
+                target = self.db.chat_id(name)
+                if target:
+                    self.say(target, "انتهت مدة ميزة الحل ⏰\nالتنبيهات شغّالة عادي.", menu(False))
+                if self.admin_id:
+                    self.say(self.admin_id, f"انتهت ميزة الحل لـ <b>{escape(self._who(name) or name)}</b> ({escape(name)}) ⏰",
+                             kb([[("مدّدها ⏳", f"adm:solpick:{name}")]]))
 
     # ---- admin uses the bot as if they were a device's owner ---------------
     def _account(self, chat):
@@ -731,6 +799,12 @@ class Bot:
             return self.admin_view("home")
         if kind == "set":
             return self._admin_settings_view(name)
+        if kind == "solpick":
+            opts = [("يوم", 24), ("3 أيام", 72), ("أسبوع", 168), ("أسبوعين", 336), ("شهر", 720), ("دائم ♾️", 0)]
+            rows = [[(lab, f"adm:solt:{name}:{h}") for lab, h in opts[i:i + 3]] for i in (0, 3)]
+            rows.append([("رجوع ⬅️", f"adm:dev:{name}")])
+            return (f"<b>ميزة الحل لـ {escape(self._who(name) or name)}</b> 🆘\nلمدة كم؟ "
+                    "<i>بعدها تنسحب لحالها ويوصله تنبيه.</i>", kb(rows))
         a = next(r for r in self.db.accounts() if r["name"] == name)
         if kind == "unl":
             return (f"متأكد تبي تفك ربط <b>{escape(name)}</b>؟\nبيوقف يوصله أي شي لين تربطه من جديد.",
@@ -738,20 +812,22 @@ class Bot:
         err = self.db.get_meta(f"err:{name}")
         urls = json.loads(self.db.get_meta(f"urls:{name}") or "{}")
         n_up = len(self.db.upcoming(name, now, limit=100))
+        solver_on = self.db.solver_enabled(name, now)
         text = (f"<b>{escape(name)}</b>" + (f" — {escape(self._who(name))}" if self._who(name) else "") + " 📱\n"
                 f"• الربط: {'مربوط ✅' if a['chat_id'] else 'غير مربوط ⚪'}"
                 + (f" (<code>{a['chat_id']}</code>)" if a["chat_id"] else "") + "\n"
                 f"• دخول المنصة: {'جاهز ✅' if len(urls) == 2 else 'ما سجّل ⚪'}\n"
                 f"• الحالة: {(escape(err) + ' ⚠️') if err else 'تمام 🟢'}\n"
-                f"• ميزة الحل: {'مفعّلة 🆘' if a['solver'] else 'مقفلة'}\n"
+                f"• ميزة الحل: {self._solver_line(name, now)}\n"
                 f"• مواعيد قادمة: {n_up}")
         st = self.db.ai_stats(name, now.strftime("%Y-%m"))
         text += (f"\n• الـ AI هذا الشهر: {st['solved']} واجب · {st['tokens']:,} توكن · {st['cost']:.2f}$ 🤖")
         rows = [[("ادخل كأنك هو 👤", f"adm:as:{name}")],
-                [("اسحب ميزة الحل 🚫" if a["solver"] else "أعط ميزة الحل 🆘", f"adm:sol:{name}")],
+                [("اسحب ميزة الحل 🚫", f"adm:sol:{name}"), ("مدّد ⏳", f"adm:solpick:{name}")] if solver_on
+                else [("أعط ميزة الحل 🆘", f"adm:sol:{name}")],
                 [("افحص الحين 🔄", f"adm:chk:{name}"), ("سجله 📜", f"adm:log:{name}")],
                 [("الإعدادات ⚙️", f"adm:set:{name}")]]
-        if a["solver"]:
+        if solver_on:
             rows.append([("حل كل واجباته 🆘", f"adm:solveall:{name}"), ("سلّم الجاهز 📤", f"adm:submitall:{name}")])
         if a["chat_id"]:
             rows.append([("تكلّم معه باسم البوت 💬", f"adm:talk:{name}")])
@@ -864,7 +940,12 @@ class Bot:
         page = "home" if kind == "home" else f"{kind}:{name}"
         if kind in ("sol", "unl2", "chk", "solveall", "submitall") and name not in self.names:
             return
-        if kind == "aset":
+        if kind == "solt":
+            dev, _, h = name.partition(":")
+            if dev in self.names and h.isdigit():
+                self.grant_solver(dev, int(h))
+            name, page = dev, f"dev:{dev}"
+        elif kind == "aset":
             devname, _, setting = name.partition(":")
             skind, _, svalue = setting.partition(":")
             if devname in self.names:
@@ -877,14 +958,11 @@ class Bot:
             self.spawn(fn, name, "-", self.admin_id)
             page = f"dev:{name}"
         elif kind == "sol":
-            on = not self.db.solver_enabled(name)
-            self.db.set_solver(name, on)
-            self.db.log(name, "أعطيت ميزة الحل 🆘" if on else "سحبت ميزة الحل 🚫")
-            self.set_commands()
-            target = self.db.chat_id(name)
-            if target:
-                self.say(target, "تم تحديث القائمة ✅" if on else "تم تحديث القائمة", menu(on))
-            page = f"dev:{name}"
+            if self.db.solver_enabled(name):
+                self.revoke_solver(name)
+                page = f"dev:{name}"
+            else:
+                page = f"solpick:{name}"
         elif kind == "unl2":
             target = self.db.chat_id(name)
             self.db.unlink(name); self.db.log(name, "فك الربط 🔗")
