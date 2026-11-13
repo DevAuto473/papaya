@@ -1,0 +1,70 @@
+name: papaya check
+
+# Runs one check cycle (python -m papaya.main check) on a schedule instead of the
+# laptop's infinite loop. Login sessions (profiles/) and the db are kept between
+# runs in GitHub Actions cache, never in the git history - this repo is public.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every ~10 min. GitHub may delay this under load; that's fine here.
+  workflow_dispatch: {}
+
+concurrency:
+  group: papaya-check
+  cancel-in-progress: false   # let a slow run finish instead of killing it mid-browser-session
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+
+      - run: pip install -r requirements.txt
+
+      - name: cache playwright browser binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('requirements.txt') }}
+
+      - run: playwright install --with-deps chromium
+
+      # state across runs: login sessions + the db. Lives only in Actions cache,
+      # never committed - this repo is public and cookies must never be.
+      - name: restore state (profiles + db)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            papaya.db
+            profiles
+          key: papaya-state-${{ github.run_id }}
+          restore-keys: papaya-state-
+
+      - name: run one check cycle
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          PAPAYA_ADMIN_CHAT_ID: ${{ secrets.PAPAYA_ADMIN_CHAT_ID }}
+          PAPAYA_ACCOUNTS: ${{ secrets.PAPAYA_ACCOUNTS }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PAPAYA_HOME: ${{ github.workspace }}
+        run: python -m papaya.main check
+
+      - name: save state (profiles + db)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            papaya.db
+            profiles
+          key: papaya-state-${{ github.run_id }}
