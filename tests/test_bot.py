@@ -66,6 +66,25 @@ def test_signup_auto_login_success(monkeypatch):
     assert any("✅" in (p.get("text") or "") for p in api.sent(ADMIN))  # admin told it worked
 
 
+def test_signup_creates_a_new_device_when_all_are_full(monkeypatch, tmp_path):
+    import json
+    api, db, bot = mk()
+    bot.spawn = lambda fn, *a: fn(*a)
+    bot.profile_dir = lambda name: tmp_path / name
+    db.set_chat("papaya01", 901); db.set_chat("papaya02", 902)   # both existing slots already taken
+    monkeypatch.setattr("papaya.bot.scraper.auto_first_login",
+                        lambda profile, email, password: {"assign": "https://x/a", "exams": "https://x/e"})
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: None)   # never actually call gh in a test
+    bot.handle(msg(KID, "/start"))
+    bot.handle(msg(KID, "Noura"))
+    bot.handle(msg(KID, "0501111111"))
+    bot.handle(msg(KID, "noura@example.com"))
+    bot.handle(msg(KID, "secret123"))
+    assert "papaya03" in bot.names                              # grew past the original 2
+    assert db.chat_id("papaya03") == KID
+    assert json.loads(db.get_meta("urls:papaya03")) == {"assign": "https://x/a", "exams": "https://x/e"}
+
+
 def test_signup_auto_login_failure_frees_the_slot_and_falls_back(monkeypatch):
     api, db, bot = mk()
     bot.spawn = lambda fn, *a: fn(*a)

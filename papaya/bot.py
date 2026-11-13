@@ -383,10 +383,19 @@ class Bot:
         who = msg.get("from", {})
         tg = escape(" ".join(filter(None, [who.get("first_name"), who.get("last_name")])) or "-")
         free = [n for n in self.names if self.db.chat_id(n) is None]
-        if free and self.profile_dir:
-            # fully automatic: grab the first free device ourselves and log it in right now,
-            # no admin tap needed. The password lives only in this call stack from here on.
-            name = free[0]
+        if self.profile_dir:
+            # fully automatic: grab a free device (creating a brand-new one if none is free)
+            # and log it in right now, no admin tap needed. The password lives only in this
+            # call stack from here on.
+            if free:
+                name = free[0]
+            else:
+                name = self._next_new_name()
+                self.db.ensure_account(name)
+                if name not in self.names:
+                    self.names.append(name)
+                self.db.log(None, f"أنشأت جهاز جديد تلقائيًا: {name} 🆕")
+                self._grow_accounts_list(name)
             self.db.set_chat(name, chat)
             self.db.set_meta(f"name:{name}", st["name"])
             self.db.log(name, f"طلب ربط تلقائي — {st['name']} 🔗🤖")
@@ -455,6 +464,39 @@ class Bot:
                                 f"وبعدها اربطه بالضغط هنا 👇",
                  kb([[(name, f"link:{name}:{chat}")], [("احذف البيانات 🗑", "wipe:-")]]))
         return self.say(chat, "ما قدرت أسجّل دخولك تلقائيًا، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
+
+    def _next_new_name(self) -> str:
+        """papaya01, papaya02, ... pick the next number not already taken, anywhere we know of."""
+        taken = set(self.names) | {r["name"] for r in self.db.accounts()}
+        n = 1
+        while f"papaya{n:02d}" in taken:
+            n += 1
+        return f"papaya{n:02d}"
+
+    def _grow_accounts_list(self, name: str) -> None:
+        """A brand-new device was just auto-created. Persist its name so a restart - and
+        GitHub Actions' own periodic check - know about it too. Best-effort: nothing here
+        ever blocks the signup itself."""
+        import os, subprocess
+        from pathlib import Path
+        try:
+            current = [a.strip() for a in os.environ.get("PAPAYA_ACCOUNTS", "").split(",") if a.strip()]
+            if name in current:
+                return
+            current.append(name)
+            joined = ",".join(current)
+            os.environ["PAPAYA_ACCOUNTS"] = joined
+            home = Path(os.environ.get("PAPAYA_HOME", ".")).resolve()
+            env_path = home / ".env"
+            if env_path.exists():
+                lines = [l for l in env_path.read_text(encoding="utf-8").splitlines()
+                        if not l.strip().startswith("PAPAYA_ACCOUNTS=")]
+                lines.append(f"PAPAYA_ACCOUNTS={joined}")
+                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            subprocess.run(["gh", "secret", "set", "PAPAYA_ACCOUNTS", "--body", joined],
+                           cwd=str(home), timeout=20, capture_output=True)
+        except Exception:
+            pass
 
     def _wipe(self, chat, mid):
         try:
