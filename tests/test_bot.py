@@ -239,3 +239,27 @@ def test_admin_talks_to_a_person_as_the_bot():
     bot.handle(msg(ADMIN, "/done"))
     bot.handle({"message": {"chat": {"id": ADMIN}, "message_id": 79, "text": "بعد الإنهاء"}})
     assert len([1 for m, p in api.calls if m == "copyMessage"]) == n             # ended: nothing relayed
+
+
+def test_admin_acts_as_a_device_owner():
+    calls = []
+
+    class FakeSolver:
+        prepare = submit = drop = submit_all = lambda self, *a: None
+        def solve_all(self, acct, arg, chat): calls.append((acct, chat))
+    api, db, bot = mk(); db.set_chat("papaya01", ADMIN); db.set_chat("papaya02", KID)
+    db.set_solver("papaya02", True); bot.solver = FakeSolver(); bot.spawn = lambda fn, *a: fn(*a)
+    bot.handle(cb(ADMIN, "adm:as:papaya02"))
+    bot.handle(msg(ADMIN, "/list"))
+    assert "papaya02" in api.sent(ADMIN)[-1]["text"]           # the banner says whose list this is
+    assert db.get_meta("listmsg:papaya02") in (None, "")        # the owner's live list is left alone
+    bot.handle(cb(ADMIN, "solveall:-"))
+    assert calls == [("papaya02", ADMIN)]                        # acts on his device, result comes to me
+    bot.handle(cb(ADMIN, "t:notify_new"))
+    assert db.get_settings("papaya02").notify_new is False      # settings buttons hit his device too
+    assert db.get_settings("papaya01").notify_new is True
+    bot.handle(msg(ADMIN, "/me"))
+    bot.handle(cb(ADMIN, "solveall:-"))
+    assert len(calls) == 1                                       # back on my own (no solver): nothing
+    bot.handle(cb(KID, "adm:as:papaya01"))                       # only the admin can do this
+    assert bot._account(KID) == "papaya02"

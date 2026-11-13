@@ -84,7 +84,7 @@ HELP = (
     "أوامر إضافية: /remind 8 (التذكير قبل 8 ساعات) · /quiet 23 6 (ساعات الهدوء)\n"
     "اختفت الأزرار؟ أرسل /start"
 )
-ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\n/talk papaya02 — تكلّم مع صاحب الجهاز باسم البوت 💬 (/done للإنهاء)\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
+ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\n/as papaya02 — استخدم البوت كأنك صاحب الجهاز 👤 (/me للرجوع)\n/talk papaya02 — تكلّم مع صاحب الجهاز باسم البوت 💬 (/done للإنهاء)\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
               "/grant papaya01 — إعطاء ميزة الحل\n/revoke papaya01 — سحب ميزة الحل")
 SOLVER_HELP = "\n<b>حل كل الواجبات</b> — أو اضغط 🆘 جنب أي واجب في «الواجبات والاختبارات» 🆘"
 
@@ -262,7 +262,7 @@ class Bot:
         parts = text.strip().split()
         cmd = parts[0].split("@")[0].lower() if parts else ""
         args = parts[1:]
-        account = self.db.account_for_chat(chat)
+        account = self._account(chat)
         is_admin = chat == self.admin_id
 
         if cmd == "/start":
@@ -274,6 +274,12 @@ class Bot:
         if cmd in ("/help",):
             extra = SOLVER_HELP if account and self.db.solver_enabled(account) else ""
             return self.say(chat, HELP + extra + (ADMIN_HELP if is_admin else ""))
+        if is_admin and cmd == "/as":
+            if not args or args[0] not in self.names:
+                return self.say(chat, "اكتب اسم الجهاز، مثال: <code>/as papaya02</code>\n" + ", ".join(self.names))
+            return self.start_as(args[0])
+        if is_admin and cmd == "/me":
+            return self.end_as()
         if is_admin and cmd == "/talk":
             if not args or args[0] not in self.names or not self.db.chat_id(args[0]):
                 linked = [n for n in self.names if self.db.chat_id(n)]
@@ -476,6 +482,35 @@ class Bot:
                  kb([[(name, f"link:{name}:{chat}")], [("احذف البيانات 🗑", "wipe:-")]]))
         return self.say(chat, "ما قدرت أسجّل دخولك تلقائيًا، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
 
+    # ---- admin uses the bot as if they were a device's owner ---------------
+    def _account(self, chat):
+        if chat == self.admin_id:
+            a = self.db.get_meta("actas")
+            if a and a in self.names:
+                return a
+        return self.db.account_for_chat(chat)
+
+    def _as_banner(self, name: str) -> str:
+        who = self._who(name)
+        return f"👤 <i>داخل كـ {escape(who or name)}" + (f" ({escape(name)})" if who else "") + " · /me للرجوع</i>\n"
+
+    def start_as(self, name: str):
+        self.db.set_meta("actas", name)
+        self.db.log(name, "👤 المشرف دخل كأنه صاحب الجهاز")
+        on = self.db.solver_enabled(name)
+        self.say(self.admin_id, self._as_banner(name) + "\nكل الأزرار والأوامر الحين تشتغل على جهازه: "
+                 "📋 واجباته واختباراته، حلّ الواجبات، الإعدادات… والنتائج توصلك أنت، هو ما يشوف شي."
+                 + ("" if on else "\n<i>ميزة الحل مو مفعّلة لهذا الجهاز — فعّلها من 👑 لو تبي تحل.</i>"),
+                 menu(on))
+        return self.say(self.admin_id, "متى ما خلصت 👇", kb([[("رجوع لحسابي ↩️", "adm:asend")]]))
+
+    def end_as(self):
+        name = self.db.get_meta("actas")
+        self.db.set_meta("actas", "")
+        mine = self.db.account_for_chat(self.admin_id)
+        on = bool(mine and self.db.solver_enabled(mine))
+        return self.say(self.admin_id, "رجعت لحسابك ↩️" if name else "أنت أصلاً على حسابك.", menu(on))
+
     # ---- admin talks to a person, as the bot -------------------------------
     def start_talk(self, name: str):
         self.db.set_meta("relay", name)
@@ -600,6 +635,9 @@ class Bot:
 
     def on_list(self, chat, account, now, stale: bool = False):
         t, kb = self.list_view(account, now, stale)
+        if chat == self.admin_id and self.db.get_meta("actas") == account:
+            res = self.say(chat, self._as_banner(account) + t, kb)
+            return res                         # the owner's own 📋 keeps being the live-updated one
         res = self.say(chat, t, kb)
         try:                                   # remember it: the check loop keeps this one up to date
             self.db.set_meta(f"listmsg:{account}", f"{chat}:{res['message_id']}")
@@ -709,7 +747,8 @@ class Bot:
                 f"• مواعيد قادمة: {n_up}")
         st = self.db.ai_stats(name, now.strftime("%Y-%m"))
         text += (f"\n• الـ AI هذا الشهر: {st['solved']} واجب · {st['tokens']:,} توكن · {st['cost']:.2f}$ 🤖")
-        rows = [[("اسحب ميزة الحل 🚫" if a["solver"] else "أعط ميزة الحل 🆘", f"adm:sol:{name}")],
+        rows = [[("ادخل كأنك هو 👤", f"adm:as:{name}")],
+                [("اسحب ميزة الحل 🚫" if a["solver"] else "أعط ميزة الحل 🆘", f"adm:sol:{name}")],
                 [("افحص الحين 🔄", f"adm:chk:{name}"), ("سجله 📜", f"adm:log:{name}")],
                 [("الإعدادات ⚙️", f"adm:set:{name}")]]
         if a["solver"]:
@@ -810,6 +849,12 @@ class Bot:
             except Exception:
                 pass
             return
+        if kind == "as":
+            if name in self.names:
+                self.start_as(name)
+            return
+        if kind == "asend":
+            return self.end_as()
         if kind == "talk":
             if name in self.names and self.db.chat_id(name):
                 self.start_talk(name)
@@ -934,7 +979,7 @@ class Bot:
                 return self.say(int(user_chat), guide(on), menu(on))
             return self.say(int(user_chat), "<b>المشرف قبلك!</b> ✅\n"
                             "باقي خطوة وحدة: يسجّل دخولك في المنصة.\nأول ما يخلص يوصلك إشعار هنا مع دليل الاستخدام ⏳")
-        account = self.db.account_for_chat(chat)
+        account = self._account(chat)
         if not account:
             return
         kind, _, rest = data.partition(":")
