@@ -237,21 +237,38 @@ class Bot:
         return res
 
     def on_clear(self, chat, upto: int | None = None, account=None):
-        """Delete this chat's messages. Message numbers in a private chat run 1, 2, 3…, so besides the
-        ones we logged we sweep the last CLEAR_RANGE numbers. Telegram refuses anything older than 48h."""
-        ids = set(self.db.chat_msgs(chat))
+        """Delete this chat's messages: every one we logged (both sides) plus a sweep of the recent
+        message numbers (private chats count 1, 2, 3...) for anything we didn't log.
+        Telegram itself never lets a bot delete messages older than 48 hours."""
+        from datetime import timedelta
+        now = datetime.now(RIYADH)
+        too_old = set(self.db.old_msgs(chat, now - timedelta(hours=48)))
+        ids = set(self.db.chat_msgs(chat)) - too_old
         if upto:
-            ids |= set(range(max(1, upto - CLEAR_RANGE), upto + 1))
-        ids = sorted(ids)
-        for i in range(0, len(ids), 100):
-            try:
-                self.api.call("deleteMessages", chat_id=chat, message_ids=ids[i:i + 100])
-            except Exception:
-                pass                             # too old / already gone: skipped by Telegram anyway
+            ids |= set(range(max(1, upto - CLEAR_RANGE), upto + 1)) - too_old
+        self._delete_ids(chat, sorted(ids, reverse=True))     # newest first
         self.db.forget_msgs(chat)
         solver_on = bool(account and self.db.solver_enabled(account))
-        self.say(chat, "نظّفت المحادثة 🧹\n<i>الرسائل الأقدم من 48 ساعة ما يقدر البوت يحذفها: "
-                       "امسحها من ⋮ ← Clear history</i>", menu(solver_on) if account else None)
+        note = ("\n<i>فيه رسائل أقدم من 48 ساعة، وتيليجرام ما يسمح لأي بوت يحذفها. "
+                "امسحها مرة وحدة من ⋮ ← Clear history، وبعدها /clear يمسح كل شي "
+                "(خصوصاً لو «احذف الرسائل بعد 24 ساعة» شغّال في الإعدادات).</i>") if too_old else ""
+        self.say(chat, "نظّفت المحادثة 🧹" + note, menu(solver_on) if account else None)
+
+    def _delete_ids(self, chat, ids: list[int], budget: int = 80) -> int:
+        """deleteMessages takes 100 at a time. If Telegram refuses a batch, split it and try the
+        halves, so one undeletable message never protects the rest. Bounded by `budget` calls."""
+        stack = [ids[i:i + 100] for i in range(0, len(ids), 100)][::-1]
+        gone = 0
+        while stack and budget > 0:
+            part = stack.pop(); budget -= 1
+            try:
+                self.api.call("deleteMessages", chat_id=chat, message_ids=part)
+                gone += len(part)
+            except Exception as e:
+                if len(part) > 1 and not is_network_error(e):
+                    half = len(part) // 2
+                    stack += [part[half:], part[:half]]
+        return gone
 
     def set_commands(self):
         """The '/' menu. The solve command exists only in the chats of devices that have the feature."""
@@ -279,6 +296,8 @@ class Bot:
         if not msg:
             return
         c = msg.get("chat", {}).get("id")
+        if c is not None and "message_id" in msg and "text" not in msg:
+            self.db.log_msg(c, msg["message_id"], now)
         if self._admin_reply(msg, c) or self._relay(msg, c) or self._inbox(msg, c):
             return
         if "text" not in msg:
@@ -608,10 +627,17 @@ class Bot:
             self.say(self.admin_id, f"{icon} <b>{who}</b> ({escape(name)}):", buttons)
             try:
                 res = self.api.call("copyMessage", chat_id=self.admin_id, from_chat_id=chat, message_id=msg["message_id"])
+                self._log_copy(self.admin_id, res)
             except Exception:
                 res = self.say(self.admin_id, "(أرسل شي ما قدرت أنقله)")
         try:
             self.db.set_meta(f"fwd:{res['message_id']}", str(chat))   # so a Reply on it goes back to them
+        except Exception:
+            pass
+
+    def _log_copy(self, chat, res):
+        try:
+            self.db.log_msg(chat, res["message_id"], datetime.now(RIYADH))
         except Exception:
             pass
 
@@ -645,7 +671,8 @@ class Bot:
         """Copy the admin's message to the person (so it comes from the bot, with a normal
         notification), then mark the admin's message 👍 so they can see it really went."""
         try:
-            self.api.call("copyMessage", chat_id=to, from_chat_id=chat, message_id=msg["message_id"])
+            res = self.api.call("copyMessage", chat_id=to, from_chat_id=chat, message_id=msg["message_id"])
+            self._log_copy(to, res)
         except Exception as e:
             why = "حاظر البوت" if isinstance(e, ApiError) and e.code == 403 else "ما قدرت أرسلها"
             return self.say(chat, f"ما وصلت الرسالة ❌ ({why})")

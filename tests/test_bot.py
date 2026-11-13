@@ -311,3 +311,26 @@ def test_admin_message_gets_a_thumbs_up_when_delivered():
             "reaction": [{"type": "emoji", "emoji": "👍"}]}) in api.calls
     copy = [p for m, p in api.calls if m == "copyMessage"][-1]
     assert "disable_notification" not in copy                   # a normal, notifying message
+
+
+def test_clear_is_not_blocked_by_one_undeletable_message():
+    from datetime import timedelta
+    api, db, bot = mk(); db.set_chat("papaya02", KID)
+    now = datetime.now(RIYADH)
+    db.log_msg(KID, 3, now - timedelta(hours=60))               # too old for Telegram: not even tried
+    for i in range(10, 20):
+        db.log_msg(KID, i, now)
+    deleted = set()
+
+    def call(m, **p):
+        api.calls.append((m, p))
+        if m == "deleteMessages":
+            if 15 in p["message_ids"]:                           # Telegram refuses any batch holding #15
+                raise Exception("Bad Request: message can't be deleted")
+            deleted.update(p["message_ids"])
+        return {"message_id": 99}
+    api.call = call
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 20, "text": "/clear"}})
+    assert set(range(10, 21)) - {15} <= deleted                  # everything else still went
+    assert 3 not in deleted
+    assert "Clear history" in api.sent(KID)[-1]["text"]          # tells them about the 48h limit
