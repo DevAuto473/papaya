@@ -284,3 +284,20 @@ def test_timed_solve_permission_runs_out():
     assert len(api.sent(KID)) == n                              # announced only once
     bot.handle(msg(ADMIN, "/grant papaya02"))                   # no duration: permanent
     assert db.solver_enabled("papaya02", later + timedelta(days=400))
+
+
+def test_free_text_reaches_admin_and_admin_answers_with_reply():
+    api, db, bot = mk(); db.set_chat("papaya02", KID); db.set_meta("name:papaya02", "Khaled")
+    api.call = lambda m, **p: api.calls.append((m, p)) or {"message_id": 500 + len(api.calls)}
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 10, "text": "البوت ما نبهني اليوم"}})
+    fwd = api.sent(ADMIN)[-1]
+    assert "Khaled" in fwd["text"] and "ما نبهني" in fwd["text"]
+    assert not any("ما فهمت" in (p.get("text") or "") for p in api.sent(KID))
+    fwd_id = int(db.con.execute("SELECT k FROM meta WHERE k LIKE 'fwd:%'").fetchone()["k"].split(":")[1])
+    bot.handle({"message": {"chat": {"id": ADMIN}, "message_id": 11, "text": "تمام بشيك عليه",
+                            "reply_to_message": {"message_id": fwd_id}}})
+    assert [p for m, p in api.calls if m == "copyMessage"][-1] == {"chat_id": KID, "from_chat_id": ADMIN, "message_id": 11}
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 12, "photo": [{"file_id": "x"}]}})   # photos too
+    assert [p for m, p in api.calls if m == "copyMessage"][-1]["chat_id"] == ADMIN
+    bot.handle(msg(KID, "/xyz"))                                  # unknown command: still 'ما فهمت'
+    assert "ما فهمت" in api.sent(KID)[-1]["text"]

@@ -278,7 +278,8 @@ class Bot:
                 msg = {**msg, "text": "+" + str(c.get("phone_number", "")).lstrip("+")}
         if not msg:
             return
-        if self._relay(msg, msg.get("chat", {}).get("id")):
+        c = msg.get("chat", {}).get("id")
+        if self._admin_reply(msg, c) or self._relay(msg, c) or self._inbox(msg, c):
             return
         if "text" not in msg:
             return
@@ -596,6 +597,53 @@ class Bot:
             self.db.log(name, "💬 انتهت المحادثة")
         return self.say(self.admin_id, "انتهت المحادثة ✋" if name else "ما فيه محادثة مفتوحة.")
 
+    def _pass_to_admin(self, msg: dict, chat, name: str, icon: str = "📩"):
+        """Show the admin what this person sent; the admin can answer with Telegram's Reply on it."""
+        who = escape(self._who(name) or name)
+        text = (msg.get("text") or "").strip()
+        buttons = kb([[("تكلّم معه 💬", f"adm:talk:{name}")]]) if icon == "📩" else kb([[("إنهاء المحادثة ✋", "adm:talkend")]])
+        if text:
+            res = self.say(self.admin_id, f"{icon} <b>{who}</b> ({escape(name)}):\n{escape(text)}", buttons)
+        else:
+            self.say(self.admin_id, f"{icon} <b>{who}</b> ({escape(name)}):", buttons)
+            try:
+                res = self.api.call("copyMessage", chat_id=self.admin_id, from_chat_id=chat, message_id=msg["message_id"])
+            except Exception:
+                res = self.say(self.admin_id, "(أرسل شي ما قدرت أنقله)")
+        try:
+            self.db.set_meta(f"fwd:{res['message_id']}", str(chat))   # so a Reply on it goes back to them
+        except Exception:
+            pass
+
+    def _inbox(self, msg: dict, chat) -> bool:
+        """A linked person wrote something that isn't a command or a button (text, photo, voice…):
+        pass it to the admin instead of answering 'ما فهمت'."""
+        if chat is None or chat == self.admin_id or not self.admin_id:
+            return False
+        text = (msg.get("text") or "").strip()
+        if text.startswith("/") or text in BUTTON_CMDS:
+            return False
+        name = self.db.account_for_chat(chat)
+        if not name or "message_id" not in msg:
+            return False
+        self._pass_to_admin(msg, chat, name)
+        return True
+
+    def _admin_reply(self, msg: dict, chat) -> bool:
+        """The admin used Telegram's Reply on a passed-on message: send the answer to that person, as the bot."""
+        if chat is None or chat != self.admin_id or "reply_to_message" not in msg:
+            return False
+        if (msg.get("text") or "").startswith("/"):
+            return False
+        to = self.db.get_meta(f"fwd:{msg['reply_to_message'].get('message_id')}")
+        if not to:
+            return False
+        try:
+            self.api.call("copyMessage", chat_id=int(to), from_chat_id=chat, message_id=msg["message_id"])
+        except Exception:
+            self.say(chat, "ما وصل الرد ❌")
+        return True
+
     def _relay(self, msg: dict, chat) -> bool:
         """While the admin talks to a device's owner: the admin's messages go to them as the bot,
         their messages come back to the admin. Commands and menu buttons are never relayed."""
@@ -620,16 +668,7 @@ class Bot:
             return True
         if self.db.account_for_chat(chat) != target:
             return False
-        who = escape(self.db.get_meta(f"name:{target}") or target)
-        if text:
-            self.say(self.admin_id, f"💬 <b>{who}</b>:\n{escape(text)}",
-                     kb([[("إنهاء المحادثة ✋", "adm:talkend")]]))
-        else:
-            self.say(self.admin_id, f"💬 <b>{who}</b>:")
-            try:
-                self.api.call("copyMessage", chat_id=self.admin_id, from_chat_id=chat, message_id=msg["message_id"])
-            except Exception:
-                self.say(self.admin_id, "(أرسل شي ما قدرت أنقله)")
+        self._pass_to_admin(msg, chat, target, icon="💬")
         return True
 
     def _next_new_name(self) -> str:
