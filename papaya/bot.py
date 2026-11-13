@@ -392,8 +392,8 @@ class Bot:
             else:
                 name = self._next_new_name()
                 self.db.ensure_account(name)
-                if name not in self.names:
-                    self.names.append(name)
+                if name not in self._names:
+                    self._names.append(name)
                 self.db.log(None, f"أنشأت جهاز جديد تلقائيًا: {name} 🆕")
                 self._grow_accounts_list(name)
             self.db.set_chat(name, chat)
@@ -474,29 +474,26 @@ class Bot:
         return f"papaya{n:02d}"
 
     def _grow_accounts_list(self, name: str) -> None:
-        """A brand-new device was just auto-created. Persist its name so a restart - and
-        GitHub Actions' own periodic check - know about it too. Best-effort: nothing here
-        ever blocks the signup itself."""
-        import os, subprocess
-        from pathlib import Path
+        """A brand-new device was just auto-created: make .env and GitHub Actions know it too."""
+        from .env import add_account
         try:
-            current = [a.strip() for a in os.environ.get("PAPAYA_ACCOUNTS", "").split(",") if a.strip()]
-            if name in current:
-                return
-            current.append(name)
-            joined = ",".join(current)
-            os.environ["PAPAYA_ACCOUNTS"] = joined
-            home = Path(os.environ.get("PAPAYA_HOME", ".")).resolve()
-            env_path = home / ".env"
-            if env_path.exists():
-                lines = [l for l in env_path.read_text(encoding="utf-8").splitlines()
-                        if not l.strip().startswith("PAPAYA_ACCOUNTS=")]
-                lines.append(f"PAPAYA_ACCOUNTS={joined}")
-                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            subprocess.run(["gh", "secret", "set", "PAPAYA_ACCOUNTS", "--body", joined],
-                           cwd=str(home), timeout=20, capture_output=True)
+            add_account(name)
         except Exception:
             pass
+
+    @property
+    def names(self) -> list[str]:
+        """Every device we know of, live: the configured list plus anything registered in the db
+        since (e.g. by `login papaya05` from the terminal, a separate process). No restart needed."""
+        try:
+            known = {r["name"] for r in self.db.accounts()}
+        except Exception:
+            known = set()
+        return sorted(set(self._names) | known)
+
+    @names.setter
+    def names(self, value):
+        self._names = list(value)
 
     def _wipe(self, chat, mid):
         try:

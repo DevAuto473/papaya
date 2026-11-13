@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 from .bot import Api, Bot
 from .cycle import run_cycle
 from .db import DB
-from .env import accounts, admin_id, load_env
+from .env import accounts, add_account, admin_id, load_env
 from .notifier import TelegramNotifier
 from .parser import RIYADH, parse_assignments, parse_exams
 from .service import SolveService
@@ -24,6 +25,11 @@ HOME = Path(os.environ.get("PAPAYA_HOME", ".")).resolve()
 
 def profile_dir(acct: str) -> Path:
     return HOME / "profiles" / acct
+
+
+def all_accounts(db) -> list[str]:
+    """Configured devices plus any registered since (by signup or `login <new>`), even by another process."""
+    return sorted(set(accounts()) | {r["name"] for r in db.accounts()})
 
 
 def check_account(db: DB, acct: str, notifier, admin_notify, fetch=None, finished: bool = True) -> str:
@@ -246,7 +252,7 @@ def cycle_loop(db_path: str, token: str, interval_min: int):
                 time.sleep(60)
                 heartbeat(db, anotify)
             continue
-        for acct in accounts():
+        for acct in all_accounts(db):
             try:
                 out = check_account(db, acct, notifier, anotify)
             except Exception as e:     # one broken account/bug must never stop the reminder loop
@@ -295,9 +301,13 @@ def main(argv=None):
     db_path = str(HOME / "papaya.db")
     if cmd == "login":
         acct = argv[1]
-        if acct not in accounts():
-            sys.exit(f"{acct} is not listed in PAPAYA_ACCOUNTS in .env")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", acct):
+            sys.exit("device name: letters, numbers, - or _ only (e.g. papaya05)")
         db = DB(db_path); db.ensure_account(acct)
+        if acct not in accounts():                       # a new device: register it everywhere
+            ok = add_account(acct)
+            print(f"[ok] new device {acct} added to .env" +
+                  (" and GitHub Actions" if ok else " (GitHub secret not updated - run: gh auth status)"))
         urls = json.loads(db.get_meta(f"urls:{acct}") or "{}")
         found = scraper.setup_manual(profile_dir(acct))
         urls.update(found)                      # fixing one page keeps the other
@@ -336,7 +346,7 @@ def main(argv=None):
         print("(nothing was sent to Telegram)")
     elif cmd == "check":
         db = DB(db_path); tok = _token()
-        for acct in accounts():
+        for acct in all_accounts(db):
             print(check_account(db, acct, TelegramNotifier(tok), _admin_notifier(tok)))
     elif cmd == "run":
         tok = _token()

@@ -200,3 +200,11 @@ def test_list_tap_never_crashes_the_thread():
     bot = Bot(api, db, ADMIN, ["papaya01"], refresh=lambda a: False, spawn=lambda fn, *a: fn(*a))
     db.set_chat("papaya01", KID)
     bot.handle(msg(KID, "/list"))                                # Telegram unreachable: must not raise
+
+
+def test_device_registered_elsewhere_shows_in_admin_panel_without_restart():
+    api, db, bot = mk()                                  # bot started knowing only papaya01, papaya02
+    db.ensure_account("papaya05")                        # e.g. `login papaya05` ran in the terminal
+    assert "papaya05" in bot.names
+    bot.handle(cb(ADMIN, "adm:home"))
+    assert "adm:dev:papaya05" in str(api.calls[-1][1].get("reply_markup"))
