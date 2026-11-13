@@ -587,7 +587,7 @@ class Bot:
         self.db.log(name, "💬 بدأت محادثة من المشرف")
         return self.say(self.admin_id, f"💬 تكلّم الحين مع <b>{escape(who)}</b> ({escape(name)})\n"
                         "أي رسالة تكتبها هنا (نص، صورة، صوت…) توصله باسم البوت، وردوده توصلك هنا.\n"
-                        "<i>الأوامر والأزرار تشتغل عادي ما تنرسل له.</i>",
+                        "<i>الأوامر والأزرار تشتغل عادي ما تنرسل له. كل رسالة توصله تنحط عليها 👍.</i>",
                         kb([[("إنهاء المحادثة ✋", "adm:talkend")]]))
 
     def end_talk(self):
@@ -638,11 +638,22 @@ class Bot:
         to = self.db.get_meta(f"fwd:{msg['reply_to_message'].get('message_id')}")
         if not to:
             return False
-        try:
-            self.api.call("copyMessage", chat_id=int(to), from_chat_id=chat, message_id=msg["message_id"])
-        except Exception:
-            self.say(chat, "ما وصل الرد ❌")
+        self._deliver(chat, int(to), msg)
         return True
+
+    def _deliver(self, chat, to: int, msg: dict):
+        """Copy the admin's message to the person (so it comes from the bot, with a normal
+        notification), then mark the admin's message 👍 so they can see it really went."""
+        try:
+            self.api.call("copyMessage", chat_id=to, from_chat_id=chat, message_id=msg["message_id"])
+        except Exception as e:
+            why = "حاظر البوت" if isinstance(e, ApiError) and e.code == 403 else "ما قدرت أرسلها"
+            return self.say(chat, f"ما وصلت الرسالة ❌ ({why})")
+        try:
+            self.api.call("setMessageReaction", chat_id=chat, message_id=msg["message_id"],
+                          reaction=[{"type": "emoji", "emoji": "👍"}])
+        except Exception:
+            pass
 
     def _relay(self, msg: dict, chat) -> bool:
         """While the admin talks to a device's owner: the admin's messages go to them as the bot,
@@ -661,10 +672,7 @@ class Bot:
                 self.db.set_meta("relay", "")
                 self.say(chat, "الجهاز ما عاد مربوط، انتهت المحادثة ✋")
                 return True
-            try:
-                self.api.call("copyMessage", chat_id=to, from_chat_id=chat, message_id=msg["message_id"])
-            except Exception:
-                self.say(chat, "ما وصلت الرسالة ❌")
+            self._deliver(chat, to, msg)
             return True
         if self.db.account_for_chat(chat) != target:
             return False

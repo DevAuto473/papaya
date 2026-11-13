@@ -301,3 +301,13 @@ def test_free_text_reaches_admin_and_admin_answers_with_reply():
     assert [p for m, p in api.calls if m == "copyMessage"][-1]["chat_id"] == ADMIN
     bot.handle(msg(KID, "/xyz"))                                  # unknown command: still 'ما فهمت'
     assert "ما فهمت" in api.sent(KID)[-1]["text"]
+
+
+def test_admin_message_gets_a_thumbs_up_when_delivered():
+    api, db, bot = mk(); db.set_chat("papaya02", KID)
+    bot.handle(msg(ADMIN, "/talk papaya02"))
+    bot.handle({"message": {"chat": {"id": ADMIN}, "message_id": 90, "text": "هلا"}})
+    assert ("setMessageReaction", {"chat_id": ADMIN, "message_id": 90,
+            "reaction": [{"type": "emoji", "emoji": "👍"}]}) in api.calls
+    copy = [p for m, p in api.calls if m == "copyMessage"][-1]
+    assert "disable_notification" not in copy                   # a normal, notifying message
