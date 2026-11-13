@@ -208,3 +208,17 @@ def test_device_registered_elsewhere_shows_in_admin_panel_without_restart():
     assert "papaya05" in bot.names
     bot.handle(cb(ADMIN, "adm:home"))
     assert "adm:dev:papaya05" in str(api.calls[-1][1].get("reply_markup"))
+
+
+def test_admin_links_a_waiting_person_to_a_free_device():
+    import json
+    api, db, bot = mk()
+    db.ensure_account("papaya05")
+    db.set_meta("urls:papaya05", json.dumps({"assign": "a", "exams": "e"}))   # logged in from the terminal
+    db.set_meta("pending_name:333", "Khaled")                                   # finished /start earlier
+    bot.handle(cb(ADMIN, "adm:dev:papaya05"))
+    assert "link:papaya05:333" in str(api.calls[-1][1].get("reply_markup"))
+    bot.handle(cb(ADMIN, "link:papaya05:333"))
+    assert db.chat_id("papaya05") == 333
+    assert db.pending_requests() == []
+    assert api.sent(333)                                  # he got the welcome guide

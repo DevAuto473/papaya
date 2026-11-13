@@ -204,6 +204,16 @@ class DB:
         self.con.execute("INSERT INTO meta VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
         self.con.commit()
 
+    def pending_requests(self) -> list[tuple[int, str]]:
+        """People who finished the /start form but are not linked to any device yet: [(chat, name)]."""
+        linked = {r["chat_id"] for r in self.accounts() if r["chat_id"]}
+        out = []
+        for r in self.con.execute("SELECT k, v FROM meta WHERE k LIKE 'pending_name:%'"):
+            c = r["k"].split(":", 1)[1]
+            if c.lstrip("-").isdigit() and int(c) not in linked:
+                out.append((int(c), r["v"]))
+        return out
+
     def get_meta(self, k: str, default=None):
         r = self.con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
         return r["v"] if r else default

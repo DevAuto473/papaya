@@ -652,6 +652,9 @@ class Bot:
             rows.append([("حل كل واجباته 🆘", f"adm:solveall:{name}"), ("سلّم الجاهز 📤", f"adm:submitall:{name}")])
         if a["chat_id"]:
             rows.append([("فك الربط 🔗", f"adm:unl:{name}")])
+        else:                                   # free device: offer whoever is waiting to be linked
+            for c, person in self.db.pending_requests()[:5]:
+                rows.append([(f"اربطه بـ {person[:25]} 🔗", f"link:{name}:{c}")])
         rows.append(back)
         return text, kb(rows)
 
