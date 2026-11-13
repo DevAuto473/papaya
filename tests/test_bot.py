@@ -222,3 +222,20 @@ def test_admin_links_a_waiting_person_to_a_free_device():
     assert db.chat_id("papaya05") == 333
     assert db.pending_requests() == []
     assert api.sent(333)                                  # he got the welcome guide
+
+
+def test_admin_talks_to_a_person_as_the_bot():
+    api, db, bot = mk(); db.set_chat("papaya02", KID); db.set_meta("name:papaya02", "Khaled")
+    bot.handle(msg(ADMIN, "/talk papaya02"))
+    admin_msg = {"message": {"chat": {"id": ADMIN}, "message_id": 77, "text": "هلا خالد"}}
+    bot.handle(admin_msg)
+    copies = [p for m, p in api.calls if m == "copyMessage"]
+    assert copies[-1] == {"chat_id": KID, "from_chat_id": ADMIN, "message_id": 77}   # sent as the bot
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 78, "text": "هلا"}})
+    assert "Khaled" in api.sent(ADMIN)[-1]["text"] and "هلا" in api.sent(ADMIN)[-1]["text"]
+    assert not any("ما فهمت" in (p.get("text") or "") for p in api.sent(KID))
+    bot.handle(msg(KID, "/list"))                         # commands are never relayed
+    n = len([1 for m, p in api.calls if m == "copyMessage"])
+    bot.handle(msg(ADMIN, "/done"))
+    bot.handle({"message": {"chat": {"id": ADMIN}, "message_id": 79, "text": "بعد الإنهاء"}})
+    assert len([1 for m, p in api.calls if m == "copyMessage"]) == n             # ended: nothing relayed

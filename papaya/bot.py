@@ -84,7 +84,7 @@ HELP = (
     "أوامر إضافية: /remind 8 (التذكير قبل 8 ساعات) · /quiet 23 6 (ساعات الهدوء)\n"
     "اختفت الأزرار؟ أرسل /start"
 )
-ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
+ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\n/talk papaya02 — تكلّم مع صاحب الجهاز باسم البوت 💬 (/done للإنهاء)\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
               "/grant papaya01 — إعطاء ميزة الحل\n/revoke papaya01 — سحب ميزة الحل")
 SOLVER_HELP = "\n<b>حل كل الواجبات</b> — أو اضغط 🆘 جنب أي واجب في «الواجبات والاختبارات» 🆘"
 
@@ -249,7 +249,11 @@ class Bot:
             c = msg["contact"]                     # the 📱 button: accept only their own number
             if c.get("user_id") == msg.get("from", {}).get("id"):
                 msg = {**msg, "text": "+" + str(c.get("phone_number", "")).lstrip("+")}
-        if not msg or "text" not in msg:
+        if not msg:
+            return
+        if self._relay(msg, msg.get("chat", {}).get("id")):
+            return
+        if "text" not in msg:
             return
         chat = msg["chat"]["id"]
         if "message_id" in msg:
@@ -270,6 +274,13 @@ class Bot:
         if cmd in ("/help",):
             extra = SOLVER_HELP if account and self.db.solver_enabled(account) else ""
             return self.say(chat, HELP + extra + (ADMIN_HELP if is_admin else ""))
+        if is_admin and cmd == "/talk":
+            if not args or args[0] not in self.names or not self.db.chat_id(args[0]):
+                linked = [n for n in self.names if self.db.chat_id(n)]
+                return self.say(chat, "اكتب اسم جهاز مربوط، مثال: <code>/talk papaya02</code>\n" + ", ".join(linked))
+            return self.start_talk(args[0])
+        if is_admin and cmd == "/done":
+            return self.end_talk()
         if is_admin and cmd in ("/grant", "/revoke"):
             if not args or args[0] not in self.names:
                 return self.say(chat, f"اكتب اسم جهاز موجود: {', '.join(self.names)}")
@@ -465,6 +476,59 @@ class Bot:
                  kb([[(name, f"link:{name}:{chat}")], [("احذف البيانات 🗑", "wipe:-")]]))
         return self.say(chat, "ما قدرت أسجّل دخولك تلقائيًا، وصلت بياناتك للمشرف ✅\nأول ما يسجّلك يوصلك تأكيد هنا.")
 
+    # ---- admin talks to a person, as the bot -------------------------------
+    def start_talk(self, name: str):
+        self.db.set_meta("relay", name)
+        who = self.db.get_meta(f"name:{name}") or name
+        self.db.log(name, "💬 بدأت محادثة من المشرف")
+        return self.say(self.admin_id, f"💬 تكلّم الحين مع <b>{escape(who)}</b> ({escape(name)})\n"
+                        "أي رسالة تكتبها هنا (نص، صورة، صوت…) توصله باسم البوت، وردوده توصلك هنا.\n"
+                        "<i>الأوامر والأزرار تشتغل عادي ما تنرسل له.</i>",
+                        kb([[("إنهاء المحادثة ✋", "adm:talkend")]]))
+
+    def end_talk(self):
+        name = self.db.get_meta("relay")
+        self.db.set_meta("relay", "")
+        if name:
+            self.db.log(name, "💬 انتهت المحادثة")
+        return self.say(self.admin_id, "انتهت المحادثة ✋" if name else "ما فيه محادثة مفتوحة.")
+
+    def _relay(self, msg: dict, chat) -> bool:
+        """While the admin talks to a device's owner: the admin's messages go to them as the bot,
+        their messages come back to the admin. Commands and menu buttons are never relayed."""
+        if chat is None:
+            return False
+        text = (msg.get("text") or "").strip()
+        if text.startswith("/") or text in BUTTON_CMDS:
+            return False
+        target = self.db.get_meta("relay")
+        if not target:
+            return False
+        if chat == self.admin_id:
+            to = self.db.chat_id(target)
+            if not to:
+                self.db.set_meta("relay", "")
+                self.say(chat, "الجهاز ما عاد مربوط، انتهت المحادثة ✋")
+                return True
+            try:
+                self.api.call("copyMessage", chat_id=to, from_chat_id=chat, message_id=msg["message_id"])
+            except Exception:
+                self.say(chat, "ما وصلت الرسالة ❌")
+            return True
+        if self.db.account_for_chat(chat) != target:
+            return False
+        who = escape(self.db.get_meta(f"name:{target}") or target)
+        if text:
+            self.say(self.admin_id, f"💬 <b>{who}</b>:\n{escape(text)}",
+                     kb([[("إنهاء المحادثة ✋", "adm:talkend")]]))
+        else:
+            self.say(self.admin_id, f"💬 <b>{who}</b>:")
+            try:
+                self.api.call("copyMessage", chat_id=self.admin_id, from_chat_id=chat, message_id=msg["message_id"])
+            except Exception:
+                self.say(self.admin_id, "(أرسل شي ما قدرت أنقله)")
+        return True
+
     def _next_new_name(self) -> str:
         """papaya01, papaya02, ... pick the next number not already taken, anywhere we know of."""
         taken = set(self.names) | {r["name"] for r in self.db.accounts()}
@@ -651,6 +715,7 @@ class Bot:
         if a["solver"]:
             rows.append([("حل كل واجباته 🆘", f"adm:solveall:{name}"), ("سلّم الجاهز 📤", f"adm:submitall:{name}")])
         if a["chat_id"]:
+            rows.append([("تكلّم معه باسم البوت 💬", f"adm:talk:{name}")])
             rows.append([("فك الربط 🔗", f"adm:unl:{name}")])
         else:                                   # free device: offer whoever is waiting to be linked
             for c, person in self.db.pending_requests()[:5]:
@@ -745,6 +810,12 @@ class Bot:
             except Exception:
                 pass
             return
+        if kind == "talk":
+            if name in self.names and self.db.chat_id(name):
+                self.start_talk(name)
+            return
+        if kind == "talkend":
+            return self.end_talk()
         page = "home" if kind == "home" else f"{kind}:{name}"
         if kind in ("sol", "unl2", "chk", "solveall", "submitall") and name not in self.names:
             return
