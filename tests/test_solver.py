@@ -452,3 +452,56 @@ def test_vip_gets_auto_solve_on_and_can_switch_it_off_while_normal_users_have_no
                        page_runner=lambda acct, url, fn: fn(object()), adapter=Adapter(), now_fn=lambda: T(5, 4, 0))
     assert svc.auto("papaya02") == [] and svc.prepare("papaya02", "X", 333) == "denied"
     assert svc.solve_all("papaya02", None, 333) == "denied"
+
+
+# ---- reading the page safely: retry only when it can help ------------------------------
+from papaya import assignment_page as ap
+
+
+class FlakyAdapter(Adapter):
+    """Raises the given errors (or returns the given lists) one per call, then the questions."""
+    def __init__(self, *steps):
+        super().__init__(); self.steps = list(steps); self.calls = 0
+    def read_questions(self, page, allow_exam=False):
+        self.calls += 1
+        if self.steps:
+            s = self.steps.pop(0)
+            if isinstance(s, Exception):
+                raise s
+            return s
+        return QS
+
+
+def flaky(*steps):
+    db, svc, n, _, calls, iid = setup()
+    ad = FlakyAdapter(*steps); svc.adapter = ad
+    waits = []; svc.sleep = waits.append
+    return db, svc, n, ad, waits, iid
+
+
+def test_platform_error_is_retried_then_solved():
+    db, svc, n, ad, waits, iid = flaky(ap.PageNotReady("error"), [])
+    assert svc.prepare("papaya01", iid, KID) == "ready"
+    assert ad.calls == 3 and waits == [20, 60]
+    assert db.get_meta(f"qcount:{iid}") == "2"                  # remembered for next time
+
+
+def test_finished_assignment_is_not_retried_and_student_is_told_why():
+    db, svc, n, ad, waits, iid = flaky(ap.PageNotReady("done"))
+    assert svc.prepare("papaya01", iid, KID).startswith("page_error")
+    assert ad.calls == 1 and waits == []
+    assert any("مسلَّم من قبل" in t for t in n.to(KID))
+
+
+def test_layout_change_is_never_retried_or_solved():
+    db, svc, n, ad, waits, iid = flaky(ap.LayoutChanged(1, 3))
+    assert svc.prepare("papaya01", iid, KID).startswith("page_error")
+    assert ad.calls == 1 and waits == [] and not db.solution("papaya01", iid)
+
+
+def test_fewer_questions_than_last_time_is_refused():
+    db, svc, n, ad, waits, iid = flaky()
+    db.set_meta(f"qcount:{iid}", "3")                           # this assignment had 3 before
+    assert svc.prepare("papaya01", iid, KID).startswith("page_error")
+    assert ad.calls == 3 and not db.solution("papaya01", iid)
+    assert any("قريت 2 سؤال من أصل 3" in t for t in n.to(KID))

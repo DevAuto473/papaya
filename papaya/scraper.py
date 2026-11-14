@@ -617,8 +617,17 @@ def fetch(profile: Path, urls: dict, headless: bool = True, finished: bool = Tru
             ctx.close()
 
 
-def with_page(profile: Path, url: str, fn, headless: bool = True):
-    """Open `url` with the account's saved session and return fn(page). Used by the solver."""
+def _on_login_page(page) -> bool:
+    host = (page.url.split("/")[2] if "://" in page.url else "").lower()
+    if any(h in host for h in MS_HOSTS):
+        return True
+    return page.locator(NAV_ANY).count() == 0 and "Solve" not in page.url
+
+
+def with_page(profile: Path, url: str, fn, headless: bool = True, login_url: str | None = None):
+    """Open `url` with the account's saved session and return fn(page). Used by the solver.
+    If the session ended and `login_url` (the account's assignments list) is known, log in again
+    by clicking only, like the periodic check does, then open `url` once more."""
     from playwright.sync_api import sync_playwright, Error as PWError
     if url and not url.startswith("http"):
         url = BASE + "/" + url.lstrip("/")
@@ -628,13 +637,22 @@ def with_page(profile: Path, url: str, fn, headless: bool = True):
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(2500)
-            if page.locator(NAV_ANY).count() == 0 and "Solve" not in page.url:
-                raise SessionExpired()
+            if _on_login_page(page):
+                if not login_url:
+                    raise SessionExpired()
+                import time
+                _relogin(page, profile, login_url, time.time())      # clicks through, or raises
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(2500)
+                if _on_login_page(page):
+                    raise SessionExpired()
             return fn(page)
         except PapayaError:
             raise
         except PWError as e:
             first = str(e).splitlines()[0][:120]
+            if any(k in first for k in NET_ERRORS):
+                raise NetworkDown(first)
             raise ScrapeError(f"خطأ متصفح: {first}", f"browser error: {first}")
         finally:
             ctx.close()

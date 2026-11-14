@@ -19,6 +19,7 @@ AUTO_SOLVE_BEFORE = timedelta(hours=5)
 AUTO_SUBMIT_BEFORE = timedelta(hours=1)
 AUTO_PER_PASS = 3          # items handled per check (every ~10 min), earliest deadline first
 MAX_MSG = 3500
+RETRY_DELAYS = (20, 60)    # seconds to wait before the 2nd and 3rd try of a page that may come back
 
 
 def budget_usd() -> float:
@@ -100,14 +101,17 @@ def preview_markup(item_id: str, url: str | None, all_agree: bool) -> dict:
 class SolveService:
     def __init__(self, db_factory, notifier, admin_id_fn, profile_dir_fn,
                  ask=None, page_runner=None, adapter=assignment_page, models=None, now_fn=None,
-                 verify_fn=None, on_change=None, confirm_after=120):
+                 verify_fn=None, on_change=None, confirm_after=120, retry_delays=RETRY_DELAYS, sleep=None):
         self.db_factory = db_factory
         self.notifier = notifier
         self.admin_id_fn = admin_id_fn
         self.profile_dir_fn = profile_dir_fn
         self._real_ai = ask is None
         self.ask = ask or (lambda m, msgs: ai.chat(m, msgs))
-        self.page_runner = page_runner or (lambda acct, url, fn: scraper.with_page(profile_dir_fn(acct), url, fn))
+        self.page_runner = page_runner or self._open_page
+        self.retry_delays = tuple(retry_delays)
+        import time
+        self.sleep = sleep or time.sleep
         self.adapter = adapter
         self.models = models or ai.models()
         self.now = now_fn or (lambda: datetime.now(RIYADH))
@@ -119,6 +123,60 @@ class SolveService:
         self._busy: set = set()
         self._lock = threading.Lock()
         self._progress: dict = {}          # chat -> ids of "⏳ ..." messages to remove when done
+
+    def _open_page(self, acct, url, fn):
+        """Real browser. Passes the account's assignments list so an ended session logs in again."""
+        try:
+            urls = json.loads(self.db_factory().get_meta(f"urls:{acct}") or "{}")
+        except Exception:
+            urls = {}
+        return scraper.with_page(self.profile_dir_fn(acct), url, fn, login_url=urls.get("assign"))
+
+    def _read_page(self, db, acct, row, chat, quiet_progress: bool):
+        """Read the questions, trying again (with a pause) only when that can help: a platform error,
+        no internet, a browser hiccup, a page without questions, or fewer questions than this same
+        assignment had before. Never retries an exam guard, a layout change or a finished assignment."""
+        fn = self._page_fn(row, "read_questions")
+        key = f"qcount:{row['id']}"
+        try:
+            known = int(db.get_meta(key) or 0)
+        except ValueError:
+            known = 0
+        tries = len(self.retry_delays) + 1
+        for i in range(tries):
+            last = i == tries - 1
+            why = ""
+            try:
+                qs = self.page_runner(acct, row["solve_url"], fn)
+            except assignment_page.PageNotReady as e:
+                if not e.retry or last:
+                    raise
+                why = e.en
+            except (assignment_page.LayoutChanged, assignment_page.NotAllowed):
+                raise
+            except scraper.ScrapeError as e:          # browser hiccup, NetworkDown, ...
+                if last:
+                    raise
+                why = e.en
+            else:
+                if not qs:
+                    if last:
+                        return qs
+                    why = "no questions"
+                elif known and len(qs) < known:       # the same assignment had more questions before
+                    if last:
+                        raise assignment_page.LayoutChanged(len(qs), known)
+                    why = f"{len(qs)} questions, {known} before"
+                else:
+                    if len(qs) != known:
+                        db.set_meta(key, str(len(qs)))
+                    return qs
+            wait = self.retry_delays[i]
+            db.log(acct, f"قراءة الواجب: محاولة {i + 2} بعد {wait} ثانية ({why}) 🔁")
+            if not quiet_progress:
+                self._say_progress(chat, "صفحة الواجب ما فتحت زين، أحاول مرة ثانية… ⏳")
+            self.sleep(wait)
+        return []
 
     # ---- helpers -------------------------------------------------------
     def _say(self, chat, text, markup=None, silent=False):
@@ -206,11 +264,13 @@ class SolveService:
         if not quiet_progress:
             self._say_progress(chat, f"أحل لك «{escape(_short(row['title'], 60))}»… (دقيقة أو دقيقتين) ⏳")
         try:
-            questions = self.page_runner(acct, row["solve_url"], self._page_fn(row, "read_questions"))
+            questions = self._read_page(db, acct, row, chat, quiet_progress)
         except scraper.PapayaError as e:
             self._admin(f"حل {acct}: {e.ar} ⚠️")
             return "page_error:" + e.ar, None, False
         if not questions:
+            self._admin(f"حل {acct}: «{escape(_short(row['title'], 60))}» بدون أسئلة بعد الانتظار وإعادة "
+                        f"التحميل، صورة الصفحة في diagnose/ ⚠️")
             return "empty", None, False
         # the tie-breaker is the expensive model: stop using it near the cap so the cap is never crossed
         tiebreak_ok = lambda: db.spend(month) < 0.8 * budget_usd()

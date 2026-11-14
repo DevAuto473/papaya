@@ -7,10 +7,11 @@ item of list (أ)), 6 = ordering (sortable <li data-id>). Anything else is repor
 from __future__ import annotations
 
 import base64
+import re
 
 from bs4 import BeautifulSoup
 
-from .scraper import ScrapeError
+from .scraper import MS_HOSTS, ScrapeError
 from .solver import Answer, Question
 
 TYPES = {"0": "choice", "2": "choice", "3": "match", "6": "order"}
@@ -29,6 +30,68 @@ SCREENSHOT_DIR = None     # set by main: where to keep a picture of the page aft
 class NotAllowed(ScrapeError):
     def __init__(self):
         super().__init__("هذي صفحة اختبار، والحل للواجبات فقط", "exam page: solving is for assignments only")
+
+
+class PageNotReady(ScrapeError):
+    """The solve page showed no questions. `state` says why, `retry` says whether trying again later
+    can help (a platform error can clear; an already-submitted assignment will not)."""
+    TEXT = {
+        "done":    ("هذا الواجب محلول أو مسلَّم من قبل", "already submitted", False),
+        "closed":  ("هذا الواجب مقفل أو انتهى وقته في المنصة", "closed on the platform", False),
+        "error":   ("المنصة رجعت صفحة خطأ أو صيانة", "platform error page", True),
+        "login":   ("المنصة طلبت تسجيل دخول بدل ما تفتح الواجب", "login page instead of the assignment", True),
+        "unknown": ("صفحة الواجب فتحت بدون أسئلة", "page opened without questions", True),
+    }
+
+    def __init__(self, state: str):
+        ar, en, retry = self.TEXT.get(state, self.TEXT["unknown"])
+        super().__init__(ar, en)
+        self.state, self.retry = state, retry
+
+
+class LayoutChanged(ScrapeError):
+    """Fewer questions were read than the page shows: never solve (and later submit) half of it."""
+    def __init__(self, read: int, seen: int):
+        super().__init__(f"قريت {read} سؤال من أصل {seen}، شكل الصفحة تغيّر فما حليت عشان ما يطلع الحل ناقص",
+                         f"read {read} of {seen} questions: page layout changed")
+        self.read, self.seen = read, seen
+
+
+_DONE = ("تم تسليم", "تم التسليم", "تم حل الواجب", "سبق لك", "لقد قمت بحل", "تم إرسال الإجابات")
+_CLOSED = ("انتهى وقت", "انتهت مدة", "انتهى موعد", "انتهت فترة", "الواجب مغلق", "غير متاح حالياً", "غير متاح حاليا")
+_ERROR = ("حدث خطأ", "خطأ في الخادم", "صيانة", "Service Unavailable", "Bad Gateway", "Server Error",
+          "Gateway Time-out", "Too Many Requests")
+
+
+def _visible_text(soup) -> str:
+    for t in soup(["script", "style", "noscript"]):
+        t.decompose()
+    return " ".join(soup.get_text(" ").split())
+
+
+def page_state(html: str, url: str = "") -> str:
+    """Why a solve page has no questions: login / done / closed / error / unknown."""
+    if any(h in (url or "") for h in MS_HOSTS) or "loginfmt" in html:
+        return "login"
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    text = _visible_text(soup)
+    if any(w in text for w in _DONE):
+        return "done"
+    if any(w in text for w in _CLOSED):
+        return "closed"
+    if any(w in title or w in text for w in _ERROR):
+        return "error"
+    return "unknown"
+
+
+def count_markers(html: str) -> int:
+    """How many questions the page itself shows, counted WITHOUT the question parser: each question
+    has a 'درجة السؤال' badge and a hidden question id. If the parser finds fewer, the layout changed."""
+    soup = BeautifulSoup(html, "html.parser")
+    badges = sum(1 for el in soup.select("[class*=badge]")
+                 if re.search(r"درجة\s+السؤال", el.get_text(" ")))
+    return max(badges, len(soup.select("input.qid")))
 
 
 def _txt(el) -> str:
@@ -84,11 +147,54 @@ def parse_questions(html: str) -> list[Question]:
     return out
 
 
+QUESTION_CARD = "div.dqc input.qid"
+WAIT_MS = 20000          # longest wait for the first question card
+SETTLE_MS = 1200         # the card count must stay the same this long before we read
+
+
+def _wait_for_questions(page, timeout_ms: int | None = None) -> int:
+    """Wait until question cards appear AND their count stops changing (the platform can draw
+    them one by one after the page itself has loaded). Returns the final count, 0 if none."""
+    import time
+    timeout_ms = WAIT_MS if timeout_ms is None else timeout_ms
+    end = time.monotonic() + timeout_ms / 1000
+    last, since = -1, time.monotonic()
+    while True:
+        try:
+            n = page.locator(QUESTION_CARD).count()
+        except Exception:
+            n = 0                              # page is in the middle of navigating
+        now = time.monotonic()
+        if n != last:
+            last, since = n, now
+        elif n > 0 and (now - since) * 1000 >= SETTLE_MS:
+            return n
+        if now >= end:
+            return max(last, 0)
+        page.wait_for_timeout(300)
+
+
 def read_questions(page, allow_exam: bool = False) -> list[Question]:
+    # exam guard first, before any waiting or reloading of the page
+    if _is_exam(page.content(), page.url) and not allow_exam:
+        raise NotAllowed()
+    if _wait_for_questions(page) == 0:
+        try:                                   # one fresh load: a slow or broken first load often clears
+            page.reload(wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        _wait_for_questions(page)
     html = page.content()
     if _is_exam(html, page.url) and not allow_exam:
         raise NotAllowed()
     qs = parse_questions(html)
+    seen = count_markers(html)
+    if seen > len(qs):                         # questions on the page that the parser missed
+        _snapshot(page, "layout_changed")
+        raise LayoutChanged(len(qs), seen)
+    if not qs:
+        _snapshot(page, "no_questions")        # keep what the bot saw, to know why it was empty
+        raise PageNotReady(page_state(html, page.url))
     cards = page.locator("div.dqc")
     for i, q in enumerate(qs):
         try:
