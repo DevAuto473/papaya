@@ -76,6 +76,7 @@ def test_new_layout_is_caught_not_half_solved(browser, monkeypatch, tmp_path):
     ("<p>لقد قمت بحل هذا الواجب</p>", "done"),
     ("<p>انتهى وقت الواجب</p>", "closed"),
     ("<title>503 Service Unavailable</title>", "error"),
+    ("<title>مدرستي | حدث خطأ ما</title><h4>ليس لديك صلاحية لإتمام العملية</h4>", "denied"),
     ("<p>صفحة فاضية</p>", "unknown"),
     ("<p>الصيانة الدورية لمواسير الماء</p>", "unknown"),            # a question about maintenance
     ("<h1>الموقع تحت الصيانة</h1>", "error"),

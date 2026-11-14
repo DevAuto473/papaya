@@ -38,6 +38,8 @@ class PageNotReady(ScrapeError):
     TEXT = {
         "done":    ("هذا الواجب محلول أو مسلَّم من قبل", "already submitted", False),
         "closed":  ("هذا الواجب مقفل أو انتهى وقته في المنصة", "closed on the platform", False),
+        "denied":  ("المنصة تقول «ليس لديك صلاحية» لهذا الرابط، افتحه من المنصة نفسها",
+                    "platform says no permission for this link", False),
         "error":   ("المنصة رجعت صفحة خطأ أو صيانة", "platform error page", True),
         "login":   ("المنصة طلبت تسجيل دخول بدل ما تفتح الواجب", "login page instead of the assignment", True),
         "unknown": ("صفحة الواجب فتحت بدون أسئلة", "page opened without questions", True),
@@ -59,6 +61,7 @@ class LayoutChanged(ScrapeError):
 
 _DONE = ("تم تسليم", "تم التسليم", "تم حل الواجب", "سبق لك", "لقد قمت بحل", "تم إرسال الإجابات")
 _CLOSED = ("انتهى وقت", "انتهت مدة", "انتهى موعد", "انتهت فترة", "الواجب مغلق", "غير متاح حالياً", "غير متاح حاليا")
+_DENIED = ("ليس لديك صلاحية", "لا تملك صلاحية", "غير مصرح")
 _ERROR = ("حدث خطأ", "خطأ في الخادم", "تحت الصيانة", "أعمال صيانة", "Service Unavailable", "Bad Gateway",
           "Server Error", "Gateway Time-out", "Too Many Requests")
 ERROR_PAGE_CHARS = 800   # an error page is short; a long page that merely mentions these words is not one
@@ -71,12 +74,14 @@ def _visible_text(soup) -> str:
 
 
 def page_state(html: str, url: str = "") -> str:
-    """Why a solve page has no questions: login / done / closed / error / unknown."""
+    """Why a solve page has no questions: login / denied / done / closed / error / unknown."""
     if any(h in (url or "") for h in MS_HOSTS) or "loginfmt" in html:
         return "login"
     soup = BeautifulSoup(html, "html.parser")
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     text = _visible_text(soup)
+    if any(w in text for w in _DENIED):
+        return "denied"               # retrying the same link gives the same answer
     if any(w in text for w in _DONE):
         return "done"
     if any(w in text for w in _CLOSED):
