@@ -316,7 +316,7 @@ def test_admin_message_gets_a_thumbs_up_when_delivered():
 
 def test_clear_is_not_blocked_by_one_undeletable_message():
     from datetime import timedelta
-    api, db, bot = mk(); db.set_chat("papaya02", KID)
+    api, db, bot = mk(); db.set_chat("papaya02", KID); bot.spawn = lambda fn, *a: fn(*a)
     now = datetime.now(RIYADH)
     db.log_msg(KID, 3, now - timedelta(hours=60))               # too old for Telegram: not even tried
     for i in range(10, 20):
@@ -362,3 +362,50 @@ def test_a_connection_failure_is_still_retried(monkeypatch):
     with pytest.raises(urllib.error.URLError):
         b.Api("T").call("sendMessage", chat_id=1, text="x")
     assert len(calls) == 3
+
+
+# ---- one person must never be able to freeze the bot ----------------------------------
+def _sync(bot, t0=1000.0):
+    bot.spawn = lambda fn, *a: fn(*a)
+    clock = [t0]; bot.clock = lambda: clock[0]
+    return clock
+
+
+def test_clear_spam_runs_once_then_waits_for_the_cooldown():
+    api, db, bot = mk(); db.set_chat("papaya02", KID); clock = _sync(bot)
+    for i in range(10):
+        bot.handle({"message": {"chat": {"id": KID}, "message_id": 50 + i, "text": "/clear"}})
+    assert sum(1 for t in api.sent(KID) if "نظّفت" in t["text"]) == 1
+    clock[0] += 31                                          # cooldown over: works again
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 70, "text": "/clear"}})
+    assert sum(1 for t in api.sent(KID) if "نظّفت" in t["text"]) == 2
+
+
+def test_clear_left_over_from_before_a_restart_is_skipped():
+    api, db, bot = mk(); db.set_chat("papaya02", KID); clock = _sync(bot)
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 5, "text": "/clear", "date": int(clock[0]) - 600}})
+    assert not api.sent(KID)
+
+
+def test_flooding_chat_is_muted_but_the_admin_never_is():
+    api, db, bot = mk(); db.set_chat("papaya02", KID); clock = _sync(bot)
+    for i in range(25):
+        bot.handle({"message": {"chat": {"id": KID}, "message_id": i + 1, "text": "/help"}})
+    helps = sum(1 for t in api.sent(KID) if "الأزرار" in t["text"])
+    assert helps == 20 and any("رسائل كثيرة" in t["text"] for t in api.sent(KID))
+    clock[0] += 121                                         # mute over
+    bot.handle({"message": {"chat": {"id": KID}, "message_id": 99, "text": "/help"}})
+    assert sum(1 for t in api.sent(KID) if "الأزرار" in t["text"]) == 21
+    for i in range(30):
+        bot.handle({"message": {"chat": {"id": ADMIN}, "message_id": 200 + i, "text": "/help"}})
+    assert not any("رسائل كثيرة" in t["text"] for t in api.sent(ADMIN))
+
+
+def test_a_burst_of_the_same_command_in_one_batch_runs_once():
+    api, db, bot = mk(); db.set_chat("papaya02", KID); _sync(bot)
+    burst = [{"update_id": i, "message": {"chat": {"id": KID}, "message_id": i, "text": "/help"}} for i in range(1, 8)]
+    burst.append({"update_id": 9, "message": {"chat": {"id": KID}, "message_id": 9, "text": "شكراً"}})
+    real = api.call
+    api.call = lambda m, **p: burst if m == "getUpdates" else real(m, **p)
+    assert bot.poll_once(None) == 10
+    assert sum(1 for t in api.sent(KID) if "الأزرار" in t["text"]) == 1

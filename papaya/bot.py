@@ -132,6 +132,11 @@ BUTTON_CMDS.update({"📋 مواعيدي": "/list", "⚙️ الإعدادات":
 COMMANDS = [("list", "الواجبات والاختبارات 📋"), ("settings", "الإعدادات ⚙️"), ("clear", "تنظيف المحادثة 🧹"),
             ("help", "مساعدة ❓")]
 CLEAR_RANGE = 1500          # how far back /clear reaches by message number (Telegram: ≤48h old only)
+CLEAR_COOLDOWN = 30         # seconds: a second /clear from the same chat this soon is ignored
+STALE_TAP = 120             # seconds: a /clear older than this (backlog after a restart) is skipped
+FLOOD_MAX = 20              # more messages than this from one chat (admin excluded) ...
+FLOOD_WINDOW = 30           # ... within this many seconds ...
+FLOOD_MUTE = 120            # ... and the bot ignores that chat for this many seconds
 
 
 def menu(solver_on: bool) -> dict:
@@ -173,6 +178,16 @@ def settings_view(db: DB, account: str):
 LOADING: dict = {}                  # (account, item_id or "-") -> spinner label; shared by every Bot instance
 SPIN = ("⏳", "⌛")
 
+
+
+def _cmd_key(upd):
+    """(chat, command) for a command message, else None. Used to collapse repeats in one batch."""
+    msg = upd.get("message") or {}
+    text = (msg.get("text") or "").strip()
+    text = BUTTON_CMDS.get(text, text)
+    if not text.startswith("/"):
+        return None
+    return (msg.get("chat", {}).get("id"), text)
 
 
 def _spawn_safe(fn, *args):
@@ -229,8 +244,58 @@ class Bot:
         self.wipe_after = 3600            # seconds until the admin's copy of a password is deleted (None = never)
         self.solver = solver
         self.spawn = spawn or _spawn_safe
+        self.clock = time.time            # replaced in tests
+        self._guard = threading.Lock()
+        self._hits: dict = {}             # chat -> times of its recent messages (flood guard)
+        self._muted: dict = {}            # chat -> time its mute ends
+        self._clearing: set = set()       # chats with a /clear running now
+        self._last_clear: dict = {}       # chat -> time of its last /clear
         for n in account_names:
             db.ensure_account(n)
+
+    # ---- protection against floods ------------------------------------
+    def _flooding(self, chat) -> bool:
+        """True while a chat (never the admin) is sending far more than a person would. The bot
+        then ignores it for FLOOD_MUTE seconds and says so once, so one person can't freeze it."""
+        if chat is None or chat == self.admin_id:
+            return False
+        now = self.clock()
+        with self._guard:
+            if now < self._muted.get(chat, 0):
+                return True
+            hits = [t for t in self._hits.get(chat, []) if t > now - FLOOD_WINDOW] + [now]
+            self._hits[chat] = hits
+            if len(hits) <= FLOOD_MAX:
+                return False
+            self._muted[chat] = now + FLOOD_MUTE
+            self._hits.pop(chat, None)
+        print(f"flood guard: chat {chat} muted for {FLOOD_MUTE}s", flush=True)
+        try:
+            self.say(chat, f"أرسلت رسائل كثيرة ورا بعض ⏳ بوقف أرد عليك {FLOOD_MUTE // 60} دقايق، وبعدها كمّل عادي.")
+        except Exception:
+            pass
+        return True
+
+    def _request_clear(self, chat, msg, account):
+        """/clear runs in the background, one at a time per chat, never again within CLEAR_COOLDOWN,
+        and taps left over from before a restart are skipped. So spamming it can't hang the bot."""
+        now = self.clock()
+        if msg.get("date") and now - msg["date"] > STALE_TAP:
+            return
+        with self._guard:
+            if chat in self._clearing or now - self._last_clear.get(chat, float("-inf")) < CLEAR_COOLDOWN:
+                return
+            self._clearing.add(chat)
+            self._last_clear[chat] = now
+
+        def run():
+            try:
+                self._list_bot().on_clear(chat, msg.get("message_id"), account)
+            finally:
+                with self._guard:
+                    self._clearing.discard(chat)
+                    self._last_clear[chat] = self.clock()
+        self.spawn(run)
 
     def say(self, chat, text, markup=None):
         p = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
@@ -296,8 +361,13 @@ class Bot:
     def handle(self, upd: dict, now: datetime | None = None):
         now = now or datetime.now(RIYADH)
         if "callback_query" in upd:
-            return self.on_callback(upd["callback_query"])
+            cq = upd["callback_query"]
+            if self._flooding((cq.get("message") or {}).get("chat", {}).get("id") or cq.get("from", {}).get("id")):
+                return
+            return self.on_callback(cq)
         msg = upd.get("message")
+        if msg and self._flooding(msg.get("chat", {}).get("id")):
+            return
         if msg and "contact" in msg and "text" not in msg and msg.get("chat", {}).get("id") in self._signup:
             c = msg["contact"]                     # the 📱 button: accept only their own number
             if c.get("user_id") == msg.get("from", {}).get("id"):
@@ -326,7 +396,7 @@ class Bot:
         if not account and chat in self._signup and not text.startswith("/"):
             return self.on_signup(chat, msg)
         if cmd == "/clear":
-            return self.on_clear(chat, msg.get("message_id"), account)
+            return self._request_clear(chat, msg, account)
         if cmd in ("/help",):
             extra = SOLVER_HELP if account and self.db.solver_enabled(account) else ""
             return self.say(chat, HELP + extra + (ADMIN_HELP if is_admin else ""))
@@ -1265,8 +1335,17 @@ class Bot:
         params = {"timeout": timeout, "allowed_updates": ["message", "callback_query"]}
         if offset is not None:
             params["offset"] = offset
-        for u in self.api.call("getUpdates", **params):
+        ups = self.api.call("getUpdates", **params)
+        last = {}                              # the same command from the same chat in one batch:
+        for i, u in enumerate(ups):            # only the last one runs (a burst of /clear = one /clear)
+            k = _cmd_key(u)
+            if k:
+                last[k] = i
+        for i, u in enumerate(ups):
             offset = u["update_id"] + 1
+            k = _cmd_key(u)
+            if k and last[k] != i:
+                continue
             try:
                 self.handle(u)
             except Exception as e:             # never let one bad update kill the loop

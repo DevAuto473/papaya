@@ -257,7 +257,7 @@ def test_clear_deletes_logged_messages_and_settings_toggle_needs_grant():
         def call(self, m, **p):
             super().call(m, **p); return {"message_id": len(self.calls) + 100}
     api = A2()
-    bot = Bot(api, db, ADMIN, ["papaya01"])
+    bot = Bot(api, db, ADMIN, ["papaya01"], spawn=lambda fn, *a: fn(*a))
     msg = lambda t, mid: {"message": {"chat": {"id": KID}, "text": t, "from": {}, "message_id": mid}}
     bot.handle(msg("/help", 5)); bot.handle(msg("/list", 6))
     assert len(db.chat_msgs(KID)) == 4                           # 2 incoming + 2 replies
