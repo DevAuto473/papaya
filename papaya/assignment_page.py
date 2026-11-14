@@ -59,8 +59,9 @@ class LayoutChanged(ScrapeError):
 
 _DONE = ("تم تسليم", "تم التسليم", "تم حل الواجب", "سبق لك", "لقد قمت بحل", "تم إرسال الإجابات")
 _CLOSED = ("انتهى وقت", "انتهت مدة", "انتهى موعد", "انتهت فترة", "الواجب مغلق", "غير متاح حالياً", "غير متاح حاليا")
-_ERROR = ("حدث خطأ", "خطأ في الخادم", "صيانة", "Service Unavailable", "Bad Gateway", "Server Error",
-          "Gateway Time-out", "Too Many Requests")
+_ERROR = ("حدث خطأ", "خطأ في الخادم", "تحت الصيانة", "أعمال صيانة", "Service Unavailable", "Bad Gateway",
+          "Server Error", "Gateway Time-out", "Too Many Requests")
+ERROR_PAGE_CHARS = 800   # an error page is short; a long page that merely mentions these words is not one
 
 
 def _visible_text(soup) -> str:
@@ -80,7 +81,7 @@ def page_state(html: str, url: str = "") -> str:
         return "done"
     if any(w in text for w in _CLOSED):
         return "closed"
-    if any(w in title or w in text for w in _ERROR):
+    if any(w in title for w in _ERROR) or (len(text) < ERROR_PAGE_CHARS and any(w in text for w in _ERROR)):
         return "error"
     return "unknown"
 

@@ -77,6 +77,9 @@ def test_new_layout_is_caught_not_half_solved(browser, monkeypatch, tmp_path):
     ("<p>انتهى وقت الواجب</p>", "closed"),
     ("<title>503 Service Unavailable</title>", "error"),
     ("<p>صفحة فاضية</p>", "unknown"),
+    ("<p>الصيانة الدورية لمواسير الماء</p>", "unknown"),            # a question about maintenance
+    ("<h1>الموقع تحت الصيانة</h1>", "error"),
+    ("<p>حدث خطأ</p>" + "<p>نص طويل</p>" * 200, "unknown"),         # a long page that just mentions it
     ("<script>var x='تم تسليم'</script><p>شي</p>", "unknown"),      # words inside scripts don't count
 ])
 def test_page_state(html, state):

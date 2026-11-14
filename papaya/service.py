@@ -266,7 +266,7 @@ class SolveService:
         try:
             questions = self._read_page(db, acct, row, chat, quiet_progress)
         except scraper.PapayaError as e:
-            self._admin(f"حل {acct}: {e.ar} ⚠️")
+            self._admin(f"حل {acct} «{escape(_short(row['title'], 50))}»: {e.ar} ⚠️")
             return "page_error:" + e.ar, None, False
         if not questions:
             self._admin(f"حل {acct}: «{escape(_short(row['title'], 60))}» بدون أسئلة بعد الانتظار وإعادة "
