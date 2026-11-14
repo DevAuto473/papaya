@@ -1,4 +1,5 @@
 import pathlib, sys
+import pytest
 from datetime import datetime
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from papaya.db import DB
@@ -334,3 +335,30 @@ def test_clear_is_not_blocked_by_one_undeletable_message():
     assert set(range(10, 21)) - {15} <= deleted                  # everything else still went
     assert 3 not in deleted
     assert "Clear history" in api.sent(KID)[-1]["text"]          # tells them about the 48h limit
+
+
+def test_a_timeout_is_never_sent_twice(monkeypatch):
+    """Waiting for Telegram's answer timed out: the message may already be in the chat."""
+    import urllib.request, urllib.error
+    from papaya.bot import Api
+    calls = []
+    def boom(req, timeout=0):
+        calls.append(req.full_url)
+        raise urllib.error.URLError(TimeoutError("timed out"))
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(urllib.error.URLError):
+        Api("T").call("sendMessage", chat_id=1, text="x")
+    assert len(calls) == 1
+
+
+def test_a_connection_failure_is_still_retried(monkeypatch):
+    import urllib.request, urllib.error, papaya.bot as b
+    calls = []
+    def boom(req, timeout=0):
+        calls.append(1)
+        raise urllib.error.URLError(ConnectionRefusedError("refused"))
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(b.time, "sleep", lambda s: None)
+    with pytest.raises(urllib.error.URLError):
+        b.Api("T").call("sendMessage", chat_id=1, text="x")
+    assert len(calls) == 3

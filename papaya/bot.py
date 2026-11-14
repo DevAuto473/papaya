@@ -34,6 +34,11 @@ def is_network_error(e: Exception) -> bool:
         and not isinstance(e, urllib.error.HTTPError)
 
 
+def maybe_delivered(e) -> bool:
+    """A timeout after the request left: Telegram may have shown the message already."""
+    return isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError)
+
+
 class Api:
     RETRIES = 2                    # extra tries for a request that never reached Telegram
 
@@ -58,9 +63,13 @@ class Api:
                     time.sleep(min(err.retry_after or 2 * (attempt + 1), 30))   # flood limit / Telegram hiccup
                     continue
                 raise err from None
-            except urllib.error.URLError:
+            except urllib.error.URLError as e:
                 # connection / DNS / TLS-handshake failure: the request was never delivered, so a retry
                 # cannot duplicate a message. (A read timeout is NOT retried: it may have been delivered.)
+                # urllib wraps a timeout while waiting for Telegram's answer in URLError too: that one
+                # may already be in the chat, so it is raised, never sent a second time.
+                if maybe_delivered(e):
+                    raise
                 if attempt < self.RETRIES and method != "getUpdates":
                     time.sleep(1.5 * (attempt + 1))
                     continue
@@ -769,6 +778,8 @@ class Bot:
             bot.on_list(chat, account, datetime.now(RIYADH), stale=stale)
         except Exception as e:
             print(f"{account}: /list could not be sent: {type(e).__name__}: {e}", flush=True)
+            if maybe_delivered(e):                   # it may already be in the chat: never send it twice
+                return
             try:                                     # one short retry so the tap is never just ignored
                 _t.sleep(3)
                 bot.on_list(chat, account, datetime.now(RIYADH), stale=stale)

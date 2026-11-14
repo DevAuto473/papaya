@@ -450,7 +450,12 @@ class SolveService:
             rows = [r for r in self._listed_items(db, acct)
                     if not (db.solution(acct, r["id"]) and db.solution(acct, r["id"])["status"] == "submitted")]
             if not rows:
-                self._say(chat, "ما عندك واجبات مفتوحة على المنصة 🎉"); return "none"
+                done = db.done_keys(acct)
+                exams = sum(1 for r in db.upcoming(acct, self.now(), limit=60)
+                            if r["kind"] == "exam" and (r["kind"], r["id"]) not in done)
+                self._say(chat, "ما عندك واجبات مفتوحة على المنصة 🎉"
+                          + (f"\nباقي {exams} اختبار، والاختبارات تحلها بنفسك ✍️" if exams else ""))
+                return "none"
             direct = db.get_settings(acct).direct_submit
             self._say_progress(chat, f"أحل {len(rows)} واجب{'ات' if len(rows) > 2 else ''}"
                             f"{' وأسلّمها' if direct else ''}… (تقريباً دقيقة لكل واجب) ⏳")
