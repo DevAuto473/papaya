@@ -180,7 +180,32 @@ def _wait_for_questions(page, timeout_ms: int | None = None) -> int:
         page.wait_for_timeout(300)
 
 
-def read_questions(page, allow_exam: bool = False) -> list[Question]:
+HOME_TEXTS = ("العودة للرئيسية", "العودة للصفحة الرئيسية", "الرئيسية")
+
+
+def _home_and_reopen(page) -> bool:
+    """The platform sometimes answers a direct link with «ليس لديك صلاحية». Doing what a person
+    does fixes it: press «العودة للرئيسية», then open the same link again."""
+    target = getattr(page, "papaya_target", None) or page.url
+    try:
+        for t in HOME_TEXTS:
+            btn = page.locator(f"a:has-text('{t}'), button:has-text('{t}')").first
+            if btn.count():
+                btn.click(timeout=8000)
+                break
+        else:
+            from .scraper import BASE
+            page.goto(BASE, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+        page.goto(target, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(1500)
+        return True
+    except Exception:
+        return False
+
+
+def read_questions(page, allow_exam: bool = False, _reopened: bool = False) -> list[Question]:
     # exam guard first, before any waiting or reloading of the page
     if _is_exam(page.content(), page.url) and not allow_exam:
         raise NotAllowed()
@@ -199,8 +224,11 @@ def read_questions(page, allow_exam: bool = False) -> list[Question]:
         _snapshot(page, "layout_changed")
         raise LayoutChanged(len(qs), seen)
     if not qs:
+        state = page_state(html, page.url)
+        if state == "denied" and not _reopened and _home_and_reopen(page):
+            return read_questions(page, allow_exam, _reopened=True)
         _snapshot(page, "no_questions")        # keep what the bot saw, to know why it was empty
-        raise PageNotReady(page_state(html, page.url))
+        raise PageNotReady(state)
     cards = page.locator("div.dqc")
     for i, q in enumerate(qs):
         try:
