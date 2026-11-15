@@ -18,7 +18,7 @@ from .env import accounts, add_account, admin_id, load_env
 from .notifier import TelegramNotifier
 from .parser import RIYADH, parse_assignments, parse_exams
 from .service import SolveService
-from . import scraper
+from . import scraper, standby
 
 HOME = Path(os.environ.get("PAPAYA_HOME", ".")).resolve()
 
@@ -276,6 +276,7 @@ def cycle_loop(db_path: str, token: str, interval_min: int):
                 except Exception as e:     # the reminder loop must never die because of the solver
                     print(f"{acct}: auto-solver crashed: {type(e).__name__}", flush=True)
             heartbeat(db, anotify)
+            standby.tick_async(db_path)      # beat + encrypted copy for the GitHub standby (throttled)
             time.sleep(random.uniform(5, 20))
         db.set_meta("last_cycle", datetime.now(RIYADH).strftime("%Y-%m-%d %H:%M"))
         try:
@@ -356,6 +357,9 @@ def main(argv=None):
             print("expire check:", type(e).__name__)
         for acct in all_accounts(db):
             print(check_account(db, acct, TelegramNotifier(tok), _admin_notifier(tok)))
+    elif cmd == "standby":                     # GitHub Actions only: cover for a silent laptop
+        tok = _token()
+        print(standby.run_standby(db_path, TelegramNotifier(tok), _admin_notifier(tok)))
     elif cmd == "run":
         tok = _token()
         DB(db_path).set_meta("started_at", datetime.now(RIYADH).isoformat(timespec="seconds"))

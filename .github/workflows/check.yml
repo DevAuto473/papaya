@@ -1,70 +1,70 @@
-name: papaya check
+name: papaya standby
 
-# Runs one check cycle (python -m papaya.main check) on a schedule instead of the
-# laptop's infinite loop. Login sessions (profiles/) and the db are kept between
-# runs in GitHub Actions cache, never in the git history - this repo is public.
+# The LAPTOP is the real bot. It sets the repo variable PAPAYA_LAST_BEAT while it runs and uploads an
+# encrypted copy of its database (release "standby"). This workflow wakes up on GitHub's schedule
+# (GitHub may run it only every few hours; that is fine for a backup) and does NOTHING while the
+# beat is fresh. Only when the laptop has been silent for AFTER_MIN minutes does it send the
+# reminders for deadlines the laptop already knew about. It never logs in to Madrasati and never
+# reads Telegram, so it cannot clash with the laptop. See papaya/standby.py.
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every ~10 min. GitHub may delay this under load; that's fine here.
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 concurrency:
-  group: papaya-check
-  cancel-in-progress: false   # let a slow run finish instead of killing it mid-browser-session
+  group: papaya-standby
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # read and write the "standby" release assets (nothing in git changes)
 
 jobs:
-  check:
+  standby:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AFTER_MIN: "45"
     steps:
+      - name: is the laptop alive?
+        id: gate
+        env:
+          BEAT: ${{ vars.PAPAYA_LAST_BEAT }}
+        run: |
+          if ! [[ "$BEAT" =~ ^[0-9]+$ ]]; then
+            echo "The laptop never reported: nothing to do."
+            echo "silent=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          age=$(( $(date +%s) - BEAT ))
+          echo "last beat $(( age / 60 )) minutes ago"
+          if [ "$age" -ge $(( AFTER_MIN * 60 )) ]; then silent=true; else silent=false; fi
+          echo "silent=$silent" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.silent == 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.silent == 'true'
         with:
           python-version: "3.12"
 
       - name: cache pip packages
+        if: steps.gate.outputs.silent == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ hashFiles('requirements.txt') }}
 
-      - run: pip install -r requirements.txt
+      - if: steps.gate.outputs.silent == 'true'
+        run: pip install beautifulsoup4
 
-      - name: cache playwright browser binary
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ hashFiles('requirements.txt') }}
-
-      - run: playwright install --with-deps chromium
-
-      # state across runs: login sessions + the db. Lives only in Actions cache,
-      # never committed - this repo is public and cookies must never be.
-      - name: restore state (profiles + db)
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            papaya.db
-            profiles
-          key: papaya-state-${{ github.run_id }}
-          restore-keys: papaya-state-
-
-      - name: run one check cycle
+      - name: remind from the laptop's last copy
+        if: steps.gate.outputs.silent == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           PAPAYA_ADMIN_CHAT_ID: ${{ secrets.PAPAYA_ADMIN_CHAT_ID }}
-          PAPAYA_ACCOUNTS: ${{ secrets.PAPAYA_ACCOUNTS }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PAPAYA_STATE_KEY: ${{ secrets.PAPAYA_STATE_KEY }}
+          PAPAYA_LAST_BEAT: ${{ vars.PAPAYA_LAST_BEAT }}
           PAPAYA_HOME: ${{ github.workspace }}
-        run: python -m papaya.main check
-
-      - name: save state (profiles + db)
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            papaya.db
-            profiles
-          key: papaya-state-${{ github.run_id }}
+        run: python -m papaya.main standby
