@@ -130,7 +130,12 @@ def done_button(it: Item, label: str = "سلّمته ✅") -> dict:
     return {"text": label, "callback_data": f"done:{'a' if it.kind == 'assignment' else 'e'}:{it.id}"}
 
 
-def button_for(it: Item, solve_ok: bool = False) -> dict | None:
+def _ai_ok(it: Item, solve_ok: bool, exam_ok: bool | None) -> bool:
+    """The 🆘 button: homework follows solve_ok; an exam only follows exam_ok (default: same as solve_ok)."""
+    return solve_ok if it.kind != "exam" or exam_ok is None else (solve_ok and exam_ok)
+
+
+def button_for(it: Item, solve_ok: bool = False, exam_ok: bool | None = None) -> dict | None:
     """Link button; plus the AI button for assignments ONLY when the admin granted it."""
     u = solve_link(it)
     if not u:
@@ -139,13 +144,13 @@ def button_for(it: Item, solve_ok: bool = False) -> dict | None:
     rows = [[{"text": label, "url": u}]]
     if it.kind == "exam":
         rows[0].append(done_button(it, "✅"))
-    if solve_ok:
+    if _ai_ok(it, solve_ok, exam_ok):
         rows.append([_ai_button(it)])
     return {"inline_keyboard": rows}
 
 
 def list_buttons(items: list, now: datetime, limit: int = 8, solve_ok: bool = False,
-                 loading: dict | None = None) -> dict | None:
+                 loading: dict | None = None, exam_ok: bool | None = None) -> dict | None:
     """loading: {item_id: label} for items being solved right now (their 🆘 becomes a spinner)."""
     rows, ticks, n = [], [], 0
     for it in sorted((i for i in items if i.deadline > now and not i.done), key=lambda i: i.deadline):
@@ -157,7 +162,7 @@ def list_buttons(items: list, now: datetime, limit: int = 8, solve_ok: bool = Fa
                 n += 1; num = f"{n}. "
                 ticks.append(done_button(it, f"{n} ✅"))
             row = [{"text": f"{num}{KIND_AR[it.kind]} {it.subject} · باقي {fmt_left(it.deadline - now)} {icon}", "url": u}]
-            if solve_ok:
+            if _ai_ok(it, solve_ok, exam_ok):
                 row.append({"text": loading[it.id], "callback_data": "noop:-"} if loading and it.id in loading
                            else {"text": "🆘", "callback_data": f"solve:{it.id}"})
             rows.append(row)
@@ -211,7 +216,7 @@ def _remind_text(it: Item, now: datetime) -> str:
 
 
 def plan(items: list[Item], known: dict, sent: set, s: Settings, now: datetime,
-         baselined: bool, solve_ok: bool = False) -> list[Notice]:
+         baselined: bool, solve_ok: bool = False, exam_ok: bool | None = None) -> list[Notice]:
     """Return notices due *now*. Nothing is ever repeated (see `sent`).
 
     Only items that are OPEN and due within the user's horizon (default: today + tomorrow)
@@ -224,7 +229,7 @@ def plan(items: list[Item], known: dict, sent: set, s: Settings, now: datetime,
     if not baselined:
         head = (f"<b>تم ربط الحساب</b> ✅\nالمفتوح وينتهي خلال {HORIZON_AR.get(s.horizon_days, f'{s.horizon_days} أيام')}: "
                 f"{sum(i.kind == 'assignment' for i in soon)} واجب و{sum(i.kind == 'exam' for i in soon)} اختبار")
-        return [Notice("summary", "-", "baseline", digest(soon, now, head), list_buttons(soon, now, solve_ok=solve_ok),
+        return [Notice("summary", "-", "baseline", digest(soon, now, head), list_buttons(soon, now, solve_ok=solve_ok, exam_ok=exam_ok),
                        covers=[(i.kind, i.id, "new") for i in soon])]
 
     if in_quiet_hours(now, s):
@@ -237,10 +242,10 @@ def plan(items: list[Item], known: dict, sent: set, s: Settings, now: datetime,
         need_rem = (s.notify_remind and it.deadline - now <= timedelta(hours=s.remind_hours)
                     and (it.kind, it.id, "remind") not in sent)
         if need_rem:      # one message is enough when both are due
-            reminds.append(Notice(it.kind, it.id, "remind", _remind_text(it, now), button_for(it, solve_ok),
+            reminds.append(Notice(it.kind, it.id, "remind", _remind_text(it, now), button_for(it, solve_ok, exam_ok),
                                   covers=[(it.kind, it.id, "new")] if need_head else []))
         elif need_head:
-            heads.append((it, Notice(it.kind, it.id, "new", _heads_up_text(it, known.get(k), now), button_for(it, solve_ok))))
+            heads.append((it, Notice(it.kind, it.id, "new", _heads_up_text(it, known.get(k), now), button_for(it, solve_ok, exam_ok))))
 
     singles = reminds + [n for _, n in heads]
     if len(singles) > 2:  # several at once (e.g. every morning): ONE grouped message
@@ -248,6 +253,6 @@ def plan(items: list[Item], known: dict, sent: set, s: Settings, now: datetime,
         its = [by_key[(n.kind, n.item_id)] for n in singles]
         covers = [(n.kind, n.item_id, n.event) for n in singles] + [c for n in singles for c in n.covers]
         return [Notice("summary", "-", "batch",
-                       digest(its, now, f"<b>{len(its)} مواعيد قريبة</b> 🔔"), list_buttons(its, now, solve_ok=solve_ok),
+                       digest(its, now, f"<b>{len(its)} مواعيد قريبة</b> 🔔"), list_buttons(its, now, solve_ok=solve_ok, exam_ok=exam_ok),
                        covers=covers)]
     return singles
