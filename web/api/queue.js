@@ -32,9 +32,9 @@ async function readJson(req) {
 }
 
 async function redis(path, commands) {
-  const r = await fetch(process.env.UPSTASH_REDIS_REST_URL.replace(/\/+$/, "") + path, {
+  const r = await fetch((process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL).replace(/\/+$/, "") + path, {
     method: "POST",
-    headers: { Authorization: "Bearer " + process.env.UPSTASH_REDIS_REST_TOKEN, "Content-Type": "application/json" },
+    headers: { Authorization: "Bearer " + (process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN), "Content-Type": "application/json" },
     body: JSON.stringify(commands),
   });
   if (!r.ok) throw new Error("redis " + r.status);
@@ -43,7 +43,7 @@ async function redis(path, commands) {
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return send(res, 405, { error: "POST only" });
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+  if (!(process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL) || !(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN)) {
     return send(res, 501, { error: "queue not configured" });
   }
   const secret = process.env.PAPAYA_WEB_SECRET || "";

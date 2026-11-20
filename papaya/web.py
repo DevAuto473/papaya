@@ -944,9 +944,15 @@ def make_handler(app: App):
 URL_KEY, QUEUE_KEY = "babaya:url", "babaya:queue"
 
 
+def _upstash_env() -> tuple[str, str]:
+    """Upstash's own names, or the KV_* names Vercel gives when it links the store."""
+    url = os.environ.get("UPSTASH_REDIS_REST_URL") or os.environ.get("KV_REST_API_URL") or ""
+    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN") or os.environ.get("KV_REST_API_TOKEN") or ""
+    return url.rstrip("/"), token
+
+
 def upstash(commands: list, path: str = "/pipeline") -> list:
-    base = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
-    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+    base, token = _upstash_env()
     if not base or not token:
         raise RuntimeError("no upstash")
     req = urllib.request.Request(base + path, json.dumps(commands).encode(), method="POST",
@@ -956,7 +962,7 @@ def upstash(commands: list, path: str = "/pipeline") -> list:
 
 
 def has_upstash() -> bool:
-    return bool(os.environ.get("UPSTASH_REDIS_REST_URL") and os.environ.get("UPSTASH_REDIS_REST_TOKEN"))
+    return all(_upstash_env())
 
 
 # ---- the tunnel: started by the bot itself, nothing to set up ------------------------------------------------
