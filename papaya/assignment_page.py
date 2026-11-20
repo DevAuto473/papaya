@@ -225,7 +225,7 @@ def read_questions(page, allow_exam: bool = False, _reopened: bool = False) -> l
         raise LayoutChanged(len(qs), seen)
     if not qs:
         state = page_state(html, page.url)
-        if state == "denied" and not _reopened and _home_and_reopen(page):
+        if state == "locked" and not _reopened and _home_and_reopen(page):
             return read_questions(page, allow_exam, _reopened=True)
         _snapshot(page, "no_questions")        # keep what the bot saw, to know why it was empty
         raise PageNotReady(state)

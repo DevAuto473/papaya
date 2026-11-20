@@ -133,5 +133,5 @@ def test_no_permission_twice_is_reported(browser, monkeypatch):
     pg.goto("http://test.local/solve")
     with pytest.raises(ap.PageNotReady) as e:
         ap.read_questions(pg)
-    assert e.value.state == "denied" and not e.value.retry
+    assert e.value.state == "locked" and not e.value.retry
     pg.close()
