@@ -281,7 +281,7 @@ class SolveService:
                 return "page_error:" + e.ar, None, False
             return "locked", None, False           # not open yet: normal, no admin alert
         except scraper.PapayaError as e:
-            self._admin(f"حل {acct}: {e.ar} ⚠️")
+            self._admin(f"حل {acct} «{escape(_short(row['title'], 50))}»: {e.ar} ⚠️")
             return "page_error:" + e.ar, None, False
         if not questions:
             self._admin(f"حل {acct}: «{escape(_short(row['title'], 60))}» بدون أسئلة بعد الانتظار وإعادة "

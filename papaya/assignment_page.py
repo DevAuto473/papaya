@@ -62,8 +62,9 @@ _DONE = ("تم تسليم", "تم التسليم", "تم حل الواجب", "س
 _CLOSED = ("انتهى وقت", "انتهت مدة", "انتهى موعد", "انتهت فترة", "الواجب مغلق", "غير متاح حالياً", "غير متاح حاليا")
 # the platform's "no permission" page: the item is listed but not open yet (e.g. not published)
 _LOCKED = ("ليس لديك صلاحية", "ليس لديك الصلاحية")
-_ERROR = ("حدث خطأ", "خطأ في الخادم", "صيانة", "Service Unavailable", "Bad Gateway", "Server Error",
-          "Gateway Time-out", "Too Many Requests")
+_ERROR = ("حدث خطأ", "خطأ في الخادم", "تحت الصيانة", "أعمال صيانة", "Service Unavailable", "Bad Gateway",
+          "Server Error", "Gateway Time-out", "Too Many Requests")
+ERROR_PAGE_CHARS = 800   # an error page is short; a long page that merely mentions these words is not one
 
 
 def _visible_text(soup) -> str:
@@ -85,7 +86,7 @@ def page_state(html: str, url: str = "") -> str:
         return "closed"
     if any(w in text for w in _LOCKED):            # before _ERROR: this page also says "حدث خطأ ما"
         return "locked"
-    if any(w in title or w in text for w in _ERROR):
+    if any(w in title for w in _ERROR) or (len(text) < ERROR_PAGE_CHARS and any(w in text for w in _ERROR)):
         return "error"
     return "unknown"
 
