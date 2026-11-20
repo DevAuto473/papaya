@@ -358,6 +358,8 @@ def main(argv=None):
             print(check_account(db, acct, TelegramNotifier(tok), _admin_notifier(tok)))
     elif cmd == "run":
         tok = _token()
+        from . import web
+        web.install(db_path)                     # bot messages also reach the web app (push + web chat)
         DB(db_path).set_meta("started_at", datetime.now(RIYADH).isoformat(timespec="seconds"))
         interval = int(os.environ.get("PAPAYA_INTERVAL_MIN", "30"))
         threading.Thread(target=cycle_loop, args=(db_path, tok, interval), daemon=True).start()
@@ -367,9 +369,11 @@ def main(argv=None):
             out = check_account(DB(db_path), acct, TelegramNotifier(tok, _log_sent(db_path)), _admin_notifier(tok),
                                 finished=False)          # the button must be quick; the 10-min check reads 'Completed'
             return "ERROR" not in out
-        bot = Bot(Api(tok), DB(db_path), admin_id(), accounts(), solver=make_solver(db_path, tok),
+        solver = make_solver(db_path, tok)
+        bot = Bot(Api(tok), DB(db_path), admin_id(), accounts(), solver=solver,
                   refresh=refresh, db_factory=lambda: DB(db_path), profile_dir=profile_dir)
         bot.set_commands()
+        web.start(db_path, solver=solver, bot=bot, refresh=refresh)   # off unless PAPAYA_WEB_SECRET is set
         print("papaya is running. Ctrl+C to stop.", flush=True)
         offset = None
         fails = 0                                 # consecutive polling failures -> back off gently

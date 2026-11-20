@@ -14,3 +14,6 @@ __pycache__/
 .pytest_cache/
 .snapshots/
 graphify-out/
+# web app (Vercel)
+web/node_modules/
+.vercel/
