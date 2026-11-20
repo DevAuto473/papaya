@@ -32,8 +32,8 @@ let cached = { url: "", at: 0 };          // kept while this function instance i
 async function botUrl(fresh) {
   if (process.env.BOT_URL) return process.env.BOT_URL.replace(/\/+$/, "");
   if (!fresh && cached.url && Date.now() - cached.at < 30000) return cached.url;
-  const base = (process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+  const base = ((process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL) || "").replace(/\/+$/, "");
+  const token = (process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN) || "";
   if (!base || !token) return "";
   try {
     const r = await fetch(base, { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
