@@ -93,3 +93,45 @@ def test_markers_count_real_badges():
                         '<div class="card-header"><div class="badge badge-timeago">درجة السؤال 1.00</div>')
     html = "".join(card.replace("{n}", str(n)) for n in (1, 2, 3, 4))
     assert ap.count_markers(html) == 4 and len(ap.parse_questions(html)) == 4
+
+
+def test_no_permission_goes_home_and_opens_the_link_again(browser):
+    """First open: «ليس لديك صلاحية». The bot presses «العودة للرئيسية», reopens, and reads."""
+    opened = []
+    denied = ("<html><head><title>مدرستي | حدث خطأ ما</title></head><body>"
+              "<h4>ليس لديك صلاحية لإتمام العملية</h4><a href='/home'>العودة للرئيسية</a></body></html>")
+    ok = page_html("add(1); add(2);")
+    def serve(route):
+        url = route.request.url
+        if url.endswith("/home"):
+            opened.append("home")
+            return route.fulfill(body="<html><body>home</body></html>", content_type="text/html; charset=utf-8")
+        opened.append("solve")
+        body = ok if "home" in opened else denied          # a plain reload does not help
+        route.fulfill(body=body, content_type="text/html; charset=utf-8")
+    pg = browser.new_page()
+    pg.route("http://test.local/**", serve)
+    pg.papaya_target = "http://test.local/solve"
+    pg.goto("http://test.local/solve")
+    pg.wait_for_timeout(300)
+    import papaya.assignment_page as m
+    old = m.WAIT_MS; m.WAIT_MS = 1500
+    try:
+        qs = ap.read_questions(pg)
+    finally:
+        m.WAIT_MS = old
+    assert len(qs) == 2 and "home" in opened
+    pg.close()
+
+
+def test_no_permission_twice_is_reported(browser, monkeypatch):
+    monkeypatch.setattr(ap, "WAIT_MS", 1000)
+    denied = ("<html><head><title>مدرستي | حدث خطأ ما</title></head><body>"
+              "<h4>ليس لديك صلاحية لإتمام العملية</h4><a href='/home'>العودة للرئيسية</a></body></html>")
+    pg = browser.new_page()
+    pg.route("http://test.local/**", lambda r: r.fulfill(body=denied, content_type="text/html; charset=utf-8"))
+    pg.goto("http://test.local/solve")
+    with pytest.raises(ap.PageNotReady) as e:
+        ap.read_questions(pg)
+    assert e.value.state == "denied" and not e.value.retry
+    pg.close()

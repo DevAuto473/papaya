@@ -524,12 +524,7 @@ class SolveService:
                 if not (sol and sol["status"] == "submitted"):
                     rows.append(r)
             if not rows:
-                done = db.done_keys(acct)
-                exams = sum(1 for r in db.upcoming(acct, self.now(), limit=60)
-                            if r["kind"] == "exam" and (r["kind"], r["id"]) not in done)
-                self._say(chat, "ما عندك واجبات مفتوحة على المنصة 🎉"
-                          + (f"\nباقي {exams} اختبار، والاختبارات تحلها بنفسك ✍️" if exams else ""))
-                return "none"
+                self._say(chat, "ما عندك واجبات مفتوحة على المنصة 🎉"); return "none"
             direct = db.get_settings(acct).direct_submit
 
             def step(db, r, t):

@@ -635,6 +635,7 @@ def with_page(profile: Path, url: str, fn, headless: bool = True, login_url: str
         ctx = _ctx(p, profile, headless)
         try:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.papaya_target = url          # the link to reopen if the platform answers «no permission»
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(2500)
             if _on_login_page(page):
