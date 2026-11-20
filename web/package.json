@@ -1,0 +1,7 @@
+{
+  "name": "babaya-web",
+  "private": true,
+  "type": "module",
+  "description": "Babaya PWA: static app in public/, Vercel functions in api/",
+  "engines": { "node": ">=20" }
+}
