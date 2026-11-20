@@ -16,3 +16,6 @@ __pycache__/
 graphify-out/
 *.db-wal
 *.db-shm
+# web app (Vercel)
+web/node_modules/
+.vercel/

@@ -77,6 +77,10 @@ class Settings:
     autoclean: bool = True            # delete chat messages older than 24 hours
 
 
+# "1": every device may use the solver for homework unless the admin switches it off ("0").
+SOLVE_EVERYONE_DEFAULT = "1"
+
+
 class DB:
     def __init__(self, path: str | Path = "papaya.db"):
         # The bot, the check loop and button jobs each run in their own thread. Allow a connection to be
@@ -220,6 +224,23 @@ class DB:
 
     # solver permission (admin-controlled) -------------------------------
     def solver_enabled(self, name: str, now: datetime | None = None) -> bool:
+        """May this device use the solver (homework)? Its own grant, or the everyone switch."""
+        if self.solver_granted(name, now):
+            return True
+        return self.everyone_solves() and self.has_account(name)
+
+    def has_account(self, name: str) -> bool:
+        return self.con.execute("SELECT 1 FROM accounts WHERE name=?", (name,)).fetchone() is not None
+
+    def everyone_solves(self) -> bool:
+        """The admin's switch 'solve for everyone'. On unless the admin turned it off."""
+        return self.get_meta("solver_everyone", SOLVE_EVERYONE_DEFAULT) != "0"
+
+    def set_everyone(self, on: bool):
+        self.set_meta("solver_everyone", "1" if on else "0")
+
+    def solver_granted(self, name: str, now: datetime | None = None) -> bool:
+        """The device's OWN grant from the admin (permanent or timed). Exams are only solved for these."""
         r = self.con.execute("SELECT solver FROM accounts WHERE name=?", (name,)).fetchone()
         if not (r and r["solver"]):
             return False

@@ -228,6 +228,8 @@ class SolveService:
             return None, "ما لقيت هذا الواجب (ممكن انحذف أو انسلّم)."
         if datetime.fromisoformat(row["deadline"]) <= self.now():
             return None, "انتهى وقت هذا الواجب."
+        if row["kind"] == "exam" and not db.solver_granted(acct):
+            return None, "هذا اختبار، الحل بالبوت للواجبات بس. افتحه وحله بنفسك ✍️"   # exams: own grant only
         if (row["status"] or "").strip() == "منتظر":
             return None, "هذا الواجب لسه ما انفتح."
         if "قنوات أخرى" in (row["status"] or "") or not row["solve_url"]:

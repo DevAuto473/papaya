@@ -94,7 +94,8 @@ HELP = (
     "اختفت الأزرار؟ أرسل /start"
 )
 ADMIN_HELP = ("\n\n<b>للمشرف:</b>\n/health — حالة النظام\n/as papaya02 — استخدم البوت كأنك صاحب الجهاز 👤 (/me للرجوع)\n/talk papaya02 — تكلّم مع صاحب الجهاز باسم البوت 💬 (/done للإنهاء)\nالإدارة — قائمة الأجهزة والصلاحيات والسجل 👑\n/name papaya03 أختي — تسمية جهاز\n/status — حالة الأجهزة والمصروف\n/unlink papaya01 — فك الربط\n"
-              "/grant papaya01 3d — إعطاء ميزة الحل لمدة (12h, 3d, 2w — بدون مدة = دائم)\n/revoke papaya01 — سحب ميزة الحل")
+              "/grant papaya01 3d — إعطاء ميزة الحل لمدة (12h, 3d, 2w — بدون مدة = دائم)\n/revoke papaya01 — سحب ميزة الحل\n"
+              "/everyone on|off — الحل لكل الأجهزة (الاختبارات تبقى للأجهزة المسموحة بس)")
 SOLVER_HELP = "\n<b>حل كل الواجبات</b> — أو اضغط 🆘 جنب أي واجب في «الواجبات والاختبارات» 🆘"
 
 GUIDE = (
@@ -351,7 +352,7 @@ class Bot:
             self.api.call("setMyCommands", commands=base)
             for a in self.db.accounts():
                 if a["chat_id"]:
-                    extra = [{"command": "solveall", "description": "🆘 حل كل الواجبات"}] if a["solver"] else []
+                    extra = [{"command": "solveall", "description": "🆘 حل كل الواجبات"}] if self.db.solver_enabled(a["name"]) else []
                     self.api.call("setMyCommands", commands=base + extra,
                                   scope={"type": "chat", "chat_id": a["chat_id"]})
         except Exception:
@@ -413,6 +414,12 @@ class Bot:
             return self.start_talk(args[0])
         if is_admin and cmd == "/done":
             return self.end_talk()
+        if is_admin and cmd == "/everyone":
+            if not args or args[0] not in ("on", "off"):
+                return self.say(chat, "الحل للجميع: " + ("شغّال ✅" if self.db.everyone_solves() else "مطفي ⛔")
+                                + "\nللتغيير: <code>/everyone on</code> أو <code>/everyone off</code>")
+            self.set_everyone_solves(args[0] == "on")
+            return self.say(chat, "الحل للجميع: " + ("شغّال ✅" if args[0] == "on" else "مطفي ⛔"))
         if is_admin and cmd in ("/grant", "/revoke"):
             if not args or args[0] not in self.names:
                 return self.say(chat, f"اكتب اسم جهاز موجود: {', '.join(self.names)}")
@@ -634,12 +641,21 @@ class Bot:
         if target:
             self.say(target, "تم تحديث القائمة", menu(False))
 
+    def set_everyone_solves(self, on: bool):
+        """The admin's switch: every device solves homework (on), or only the granted ones (off).
+        Exams are never part of this switch: they follow each device's own grant."""
+        self.db.set_everyone(on)
+        self.db.log(None, "الحل للجميع: " + ("شغّال ✅" if on else "مطفي ⛔"))
+        self.set_commands()
+
     def expire_check(self, now=None):
         """Called by the check loop: turn off timed grants that ran out, and say so once."""
         now = now or datetime.now(RIYADH)
         for name in self.names:
-            self.db.solver_enabled(name, now)          # switches it off if its time is up
+            self.db.solver_granted(name, now)          # switches it off if its time is up
             if self.db.take_expired_solver(name):
+                if self.db.everyone_solves():
+                    continue                           # everyone has the solver: nothing was lost
                 self.db.log(name, "انتهت مدة ميزة الحل ⏰")
                 self.set_commands()
                 target = self.db.chat_id(name)
@@ -904,7 +920,7 @@ class Bot:
                  and i.is_open and in_horizon(i, now, s.horizon_days)]      # same as the alerts setting
         solver_on = self.db.solver_enabled(account)
         busy = {iid: lab for (a, iid), lab in list(LOADING.items()) if a == account}
-        kb = list_buttons(items, now, solve_ok=solver_on, loading=busy)
+        kb = list_buttons(items, now, solve_ok=solver_on, loading=busy, exam_ok=self.db.solver_granted(account))
         if solver_on and any(i.is_open and i.solve_url and not i.external_submission for i in items):
             kb = kb or {"inline_keyboard": []}
             kb["inline_keyboard"].append([{"text": busy["-"], "callback_data": "noop:-"} if "-" in busy
@@ -926,7 +942,9 @@ class Bot:
         if page == "home":
             lines = ["<b>لوحة الإدارة</b> 👑",
                      f"مصروف الحل هذا الشهر: {self.db.spend(now.strftime('%Y-%m')):.2f}$ من 10$ 💰",
-                     f"آخر فحص: {escape(self.db.get_meta('last_cycle') or 'لم يتم بعد')} 🕒"]
+                     f"آخر فحص: {escape(self.db.get_meta('last_cycle') or 'لم يتم بعد')} 🕒",
+                     "الحل للجميع: " + ("✅ شغّال — كل الأجهزة تحل الواجبات (الاختبارات للأجهزة المسموحة بس)"
+                                        if self.db.everyone_solves() else "⛔ مطفي — بس الأجهزة المسموحة 🆘")]
             month = now.strftime("%Y-%m")
             tot = [self.db.ai_stats(n, month) for n in self.names]
             lines += [f"الـ AI هذا الشهر: {sum(t['solved'] for t in tot)} واجب · "
@@ -940,6 +958,7 @@ class Bot:
                 dot = "⚪" if not a["chat_id"] else "⚠️" if self.db.get_meta(f"err:{n}") else "🟢"
                 who = self._who(n)
                 rows.append([(f"{n}" + (f" · {who}" if who else "") + (" · 🆘" if a["solver"] else "") + f" {dot}", f"adm:dev:{n}")])
+            rows.append([("الحل للجميع: " + ("إطفاء ⛔" if self.db.everyone_solves() else "تشغيل ✅"), "adm:everyone")])
             rows.append([("السجل 📜", "adm:log:-"), ("الحالة 🩺", "adm:health"), ("تحديث 🔄", "adm:home")])
             return "\n".join(lines), kb(rows)
         kind, _, name = page.partition(":")
@@ -1092,6 +1111,9 @@ class Bot:
             return
         if kind == "talkend":
             return self.end_talk()
+        if kind == "everyone":
+            self.set_everyone_solves(not self.db.everyone_solves())
+            kind, name = "home", ""
         page = "home" if kind == "home" else f"{kind}:{name}"
         if kind in ("sol", "unl2", "chk", "solveall", "submitall") and name not in self.names:
             return

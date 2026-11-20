@@ -27,7 +27,7 @@ def run_cycle(db: DB, account: str, items: list[Item], notifier, now: datetime |
 
     done = db.done_keys(account)       # submitted (by the bot or by hand): no alerts, not in summaries
     notices = plan([i for i in items if (i.kind, i.id) not in done], db.known(account), db.sent_events(account), settings, now, baselined,
-                   solve_ok=db.solver_enabled(account))
+                   solve_ok=db.solver_enabled(account), exam_ok=db.solver_granted(account))
 
     sent_n = 0
     failed: set[tuple[str, str]] = set()

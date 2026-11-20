@@ -1,3 +1,4 @@
 beautifulsoup4>=4.12
 playwright>=1.45
 pytest>=8
+pywebpush>=2.0
