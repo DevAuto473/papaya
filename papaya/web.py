@@ -940,10 +940,94 @@ def make_handler(app: App):
 
 
 # ---- requests queued on Vercel while the laptop was off ------------------------------------------------------
+# ---- Upstash (the small store Vercel gives you): where the bot leaves its address and Vercel the queue ----
+URL_KEY, QUEUE_KEY = "babaya:url", "babaya:queue"
+
+
+def upstash(commands: list, path: str = "/pipeline") -> list:
+    base = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+    if not base or not token:
+        raise RuntimeError("no upstash")
+    req = urllib.request.Request(base + path, json.dumps(commands).encode(), method="POST",
+                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
+def has_upstash() -> bool:
+    return bool(os.environ.get("UPSTASH_REDIS_REST_URL") and os.environ.get("UPSTASH_REDIS_REST_TOKEN"))
+
+
+# ---- the tunnel: started by the bot itself, nothing to set up ------------------------------------------------
+TUNNEL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+
+
+def tunnel_url(line: str) -> str | None:
+    m = TUNNEL_RE.search(line or "")
+    return m.group(0) if m else None
+
+
+def _cloudflared(home: str) -> str | None:
+    """cloudflared from PATH, or downloaded once next to the bot (from Cloudflare's GitHub releases)."""
+    import platform
+    import shutil
+    found = shutil.which("cloudflared")
+    if found:
+        return found
+    path = os.path.join(home, ".bin", "cloudflared")
+    if os.path.exists(path):
+        return path
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine().lower())
+    if not arch:
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+    print("web app: downloading cloudflared (one time)…", flush=True)
+    with urllib.request.urlopen(url, timeout=120) as r, open(path + ".part", "wb") as f:
+        f.write(r.read())
+    os.chmod(path + ".part", 0o755)
+    os.replace(path + ".part", path)
+    return path
+
+
+def _tunnel_loop(port: int, home: str):
+    """Keep a free Cloudflare quick tunnel open to the local API and tell Vercel (through Upstash) its address.
+    The address changes on every start; Vercel always reads the latest one."""
+    import subprocess
+    while True:
+        try:
+            exe = _cloudflared(home)
+            if not exe:
+                print("web app: cloudflared is not available for this computer", flush=True)
+                return
+            proc = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                url = tunnel_url(line)
+                if url:
+                    upstash([["SET", URL_KEY, url]])
+                    print(f"web app: online ({url})", flush=True)
+            proc.wait()
+        except Exception as e:
+            print(f"web app: tunnel: {type(e).__name__}: {e}", flush=True)
+        time.sleep(15)                          # it dropped: open a new one
+
+
 def take_queue(app: App, fetch=None) -> int:
     """Pull and run what people asked for while the bot was asleep. Returns how many were handled."""
     url = os.environ.get("PAPAYA_WEB_QUEUE_URL", "")
-    if not url or not app.secret:
+    if fetch is None and has_upstash() and app.secret:
+        def fetch():                            # straight from the store, no Vercel call
+            out = upstash([["LRANGE", QUEUE_KEY, "0", "-1"], ["DEL", QUEUE_KEY]], "/multi-exec")
+            items = []
+            for s in (out[0].get("result") or []):
+                try:
+                    items.append(json.loads(s))
+                except ValueError:
+                    pass
+            return items
+    if fetch is None and (not url or not app.secret):
         return 0
     if fetch is None:
         def fetch():
@@ -996,7 +1080,14 @@ def start(db_path: str, solver=None, bot=None, refresh=None) -> ThreadingHTTPSer
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=_queue_loop, args=(app,), daemon=True).start()
-    print(f"web app: API on http://127.0.0.1:{port} (expose it with the tunnel)", flush=True)
+    print(f"web app: API on http://127.0.0.1:{port}", flush=True)
+    if os.environ.get("PAPAYA_WEB_TUNNEL", "on") != "off":
+        if has_upstash():
+            home = os.environ.get("PAPAYA_HOME", ".")
+            threading.Thread(target=_tunnel_loop, args=(port, home), daemon=True).start()
+        else:
+            print("web app: put UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in .env (from Vercel → Storage)",
+                  flush=True)
     return srv
 
 

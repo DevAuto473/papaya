@@ -5,23 +5,20 @@
 ## كيف يشتغل
 
 ```
-الجوال ──► Vercel (الواجهة + /api/bot) ──► النفق (ngrok) ──► البوت على اللابتوب (papaya/web.py)
+الجوال ──► Vercel (الواجهة + /api/bot) ──► نفق Cloudflare مجاني ──► البوت على اللابتوب (papaya/web.py)
 ```
 
-- الواجهة في `public/` وما تحتاج build.
-- `api/bot.js` يمرر الطلبات للابتوب ويضيف السر `PAPAYA_WEB_SECRET`. إذا اللابتوب ما رد، يطلع «ببايه نايم».
-- `api/queue.js` يحفظ الطلبات وقت النوم في Upstash (مجاني). البوت أول ما يصحى يسحبها وينفذها ويرسل إشعار.
-- الإشعارات: كل رسالة يرسلها البوت في تيليجرام لجهاز توصل له إشعار بعد، وتنحفظ في محادثة الموقع.
+- البوت يفتح النفق بنفسه (ينزّل cloudflared أول مرة) ويحط عنوانه في Upstash. Vercel يقرأ العنوان من هناك.
+  ما فيه دومين ولا حساب Cloudflare ولا ngrok.
+- `api/bot.js` يمرر الطلبات للابتوب ويضيف السر `PAPAYA_WEB_SECRET`. إذا اللابتوب ما رد يطلع «ببايه نايم».
+- `api/queue.js` يحفظ الطلبات وقت النوم في نفس Upstash، والبوت يسحبها أول ما يصحى.
 
-## متغيرات Vercel
+## الإعداد (مرة وحدة)
 
-| المتغير | القيمة |
-|---|---|
-| `BOT_URL` | رابط النفق الثابت، مثل `https://xxxx.ngrok-free.app` |
-| `PAPAYA_WEB_SECRET` | نفس اللي في `.env` |
-| `UPSTASH_REDIS_REST_URL` و `UPSTASH_REDIS_REST_TOKEN` | من Upstash (اختياري، لطابور وقت النوم) |
-
-Root Directory في Vercel = `web`.
+1. Vercel: Add New → Project → الريبو، Root Directory = `web`، Production Branch = `merged`.
+2. Vercel: Storage → Create → Upstash (Redis) → اربطه بالمشروع (يضيف متغيراته لحاله).
+3. Vercel: Environment Variables → `PAPAYA_WEB_SECRET` = نفس اللي في `.env`، ثم Redeploy.
+4. `.env` على اللابتوب: `PAPAYA_WEB_SECRET` و `UPSTASH_REDIS_REST_URL` و `UPSTASH_REDIS_REST_TOKEN`.
 
 ## تجربة محلية
 

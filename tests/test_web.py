@@ -300,3 +300,38 @@ def test_live_status_message_on_the_web(world, monkeypatch):
     assert world.pushed and world.pushed[-1][1]["body"] == "الحلول جاهزة 🆘"
     n.edit(KID, 9, "تم ✅")                                                # a real chat's final edit is pushed too
     assert world.pushed[-1][1]["body"] == "تم ✅"
+
+
+def test_tunnel_address_is_found_and_published(tmp_path, monkeypatch):
+    line = "2026-11-20T12:00:00Z INF |  https://brave-lion-sky.trycloudflare.com                    |"
+    assert web.tunnel_url(line) == "https://brave-lion-sky.trycloudflare.com"
+    assert web.tunnel_url("INF Registered tunnel connection") is None
+    fake = tmp_path / "cloudflared"                       # stands in for cloudflared: prints its address, then ends
+    fake.write_text("#!/bin/sh\necho 'INF Requesting new quick Tunnel'\necho '|  " + line.split("|")[1].strip() + "  |'\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(web, "_cloudflared", lambda home: str(fake))
+    sets = []
+    monkeypatch.setattr(web, "upstash", lambda cmds, path="/pipeline": sets.extend(cmds) or [{"result": "OK"}])
+
+    def stop(_):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(web.time, "sleep", stop)
+    with pytest.raises(KeyboardInterrupt):
+        web._tunnel_loop(8787, str(tmp_path))
+    assert sets == [["SET", web.URL_KEY, "https://brave-lion-sky.trycloudflare.com"]]
+
+
+def test_queue_is_taken_straight_from_upstash(world, monkeypatch):
+    tok = world.login("papaya01")
+    monkeypatch.setenv("UPSTASH_REDIS_REST_URL", "https://x.upstash.io")
+    monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", "t")
+    calls = []
+
+    def fake(cmds, path="/pipeline"):
+        calls.append((path, cmds))
+        return [{"result": [json.dumps({"th": web._h(tok), "action": "notify"}), "not json"]}, {"result": 1}]
+    monkeypatch.setattr(web, "upstash", fake)
+    web.subscribe(DB(world.path), "papaya01", {"endpoint": "https://push.example/u", "keys": {"p256dh": "x", "auth": "y"}})
+    assert web.take_queue(world.app) == 1
+    assert calls[0] == ("/multi-exec", [["LRANGE", web.QUEUE_KEY, "0", "-1"], ["DEL", web.QUEUE_KEY]])
+    assert any("صحي" in p[1]["body"] for p in world.pushed)
