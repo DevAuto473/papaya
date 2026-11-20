@@ -71,7 +71,7 @@ class Settings:
     notify_opened: bool = True
     remind_external: bool = True      # also used as "show externally-submitted items"
     horizon_days: int = 1             # 1 = next 24 hours, N = within N calendar days, 0 = all
-    auto_solve: bool = True           # solver: prepare a solution 5h before the deadline
+    auto_solve: bool = True           # solver: prepare a solution 24h before the deadline
     auto_submit: bool = False         # solver: submit by itself 1h before, only if every answer agreed
     direct_submit: bool = False       # solver: submit right after solving, no preview tap (owner's choice)
     autoclean: bool = True            # delete chat messages older than 24 hours

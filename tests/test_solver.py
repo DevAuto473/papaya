@@ -109,12 +109,12 @@ def test_failed_submit_keeps_solution_and_gives_link():
     assert svc.submit("papaya01", iid, KID) == "submitted"
 
 
-def test_auto_solve_5h_before_and_auto_submit_only_if_all_agree(monkeypatch):
+def test_auto_solve_24h_before_and_auto_submit_only_if_all_agree(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "x")
-    # assignment due 11-05 08:21 -> 5h window opens 03:21
-    db, svc, n, ad, calls, _ = setup(answers_b=(2, 1), now=T(5, 2, 0))
-    assert svc.auto("papaya01") == []                        # 6h21 left: too early
-    svc.now = lambda: T(5, 4, 0)
+    # assignment due 11-05 08:21 -> 24h window opens 11-04 08:21
+    db, svc, n, ad, calls, _ = setup(answers_b=(2, 1), now=T(4, 8, 0))
+    assert svc.auto("papaya01") == []                        # 24h21 left: too early
+    svc.now = lambda: T(4, 9, 0)                             # 23h21 left: inside the 24h window
     r = svc.auto("papaya01"); assert r and set(r) == {"ready"}
     db.set_setting("papaya01", "auto_submit", 1)
     svc.now = lambda: T(5, 7, 40)
@@ -400,7 +400,7 @@ def test_solve_all_only_touches_what_the_time_filter_shows():
     assert all(db.solution("papaya01", i) is None for i in hidden)         # hidden ones were left alone
 
 
-def test_auto_mode_solves_both_assignments_and_exams_within_5h_and_reports(monkeypatch):
+def test_auto_mode_solves_both_assignments_and_exams_within_24h_and_reports(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "x")
     db, svc, n, ad, calls, _ = setup(now=T(5, 4, 0))
     db.set_setting("papaya01", "direct_submit", 1)                 # solve + submit in one go, then report
@@ -408,16 +408,16 @@ def test_auto_mode_solves_both_assignments_and_exams_within_5h_and_reports(monke
     for _ in range(6):                                              # a few check cycles
         svc.auto("papaya01")
     sols = {r["item_id"]: r["status"] for r in db.con.execute("select item_id,status from solutions")}
-    assert any(i in exams for i in sols), "an exam inside the 5h window must be handled"
-    assert any(i not in exams for i in sols), "an assignment inside the 5h window must be handled"
+    assert any(i in exams for i in sols), "an exam inside the 24h window must be handled"
+    assert any(i not in exams for i in sols), "an assignment inside the 24h window must be handled"
     assert all(st == "submitted" for st in sols.values())
     report = [t for t in n.to(KID) if "حليته وسلّمته تلقائياً" in t]
     assert report and all("كان باقي" in t and "📚" in t for t in report)
-    # nothing further than 5h away was touched
+    # nothing further than 24h away was touched
     from datetime import timedelta
     for i in sols:
         k = "exam" if i in exams else "assignment"
-        assert datetime.fromisoformat(db.item("papaya01", k, i)["deadline"]) - T(5, 4, 0) <= timedelta(hours=5)
+        assert datetime.fromisoformat(db.item("papaya01", k, i)["deadline"]) - T(5, 4, 0) <= timedelta(hours=24)
 
 
 def test_vip_gets_auto_solve_on_and_can_switch_it_off_while_normal_users_have_no_solving(monkeypatch):
@@ -505,3 +505,97 @@ def test_fewer_questions_than_last_time_is_refused():
     assert svc.prepare("papaya01", iid, KID).startswith("page_error")
     assert ad.calls == 3 and not db.solution("papaya01", iid)
     assert any("قريت 2 سؤال من أصل 3" in t for t in n.to(KID))
+
+
+def test_locked_item_is_not_retried_now_and_student_is_not_spammed_in_auto_mode(monkeypatch):
+    """24h window: the bot reaches items the platform has not opened yet ('ليس لديك صلاحية')."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    from datetime import timedelta
+    db, svc, n, _, calls, iid = setup(now=T(5, 4, 0))
+    ad = FlakyAdapter(*[ap.PageNotReady("locked")] * 50); svc.adapter = ad
+    waits = []; svc.sleep = waits.append
+    before = len(n.to(KID))
+    r = svc.auto("papaya01")
+    assert "locked" in r and waits == []                       # no pointless in-place retries
+    tried = ad.calls
+    assert len(n.to(KID)) == before                            # the student hears nothing
+    assert not any("صلاحية" in t or "ما انفتح" in t for t in n.to(ADMIN))
+    svc.now = lambda: T(5, 4, 30)
+    svc.auto("papaya01"); assert ad.calls == tried             # backs off: no new try within the hour
+    svc.now = lambda: T(5, 5, 5)
+    ad.steps = []                                              # now it is open
+    r = svc.auto("papaya01"); assert ad.calls > tried and set(r) & {"ready", "submitted"}
+
+
+def test_auto_failure_waits_30_min_and_tells_student_nothing(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    db, svc, n, _, calls, iid = setup(now=T(5, 4, 0))
+    ad = FlakyAdapter(*[ap.PageNotReady("error")] * 50); svc.adapter = ad
+    svc.sleep = lambda s: None
+    before = len(n.to(KID))
+    svc.auto("papaya01"); tried = ad.calls
+    assert len(n.to(KID)) == before
+    svc.now = lambda: T(5, 4, 20); svc.auto("papaya01"); assert ad.calls == tried
+    svc.now = lambda: T(5, 4, 31); svc.auto("papaya01"); assert ad.calls > tried
+
+
+def test_manual_solve_of_locked_item_tells_the_student():
+    db, svc, n, ad, waits, iid = flaky(ap.PageNotReady("locked"))
+    assert svc.prepare("papaya01", iid, KID) == "locked"
+    assert ad.calls == 1 and any("ما انفتح" in t for t in n.to(KID))
+
+
+class LiveNotif(Notif):
+    """Gives real message ids and records edits, like Telegram."""
+    def __init__(self): super().__init__(); self.edits = []; self.deleted = []
+    def send(self, chat, text, markup=None, silent=False):
+        super().send(chat, text, markup, silent); return len(self.sent)
+    def edit(self, chat, mid, text, markup=None): self.edits.append((chat, mid, text, markup)); return True
+    def delete(self, chat, ids): self.deleted += list(ids)
+
+
+def test_solve_all_is_one_message_edited_and_errors_grouped_at_the_end():
+    db, svc, n, ad, calls, iid = setup()
+    svc.notifier = n = LiveNotif()
+    first = svc._listed_items(db, "papaya01")[0]
+    real = svc.page_runner
+    def runner(acct, url, fn):
+        if url == first["solve_url"]:
+            raise ScrapeError("الصفحة ما فتحت", "boom")
+        return real(acct, url, fn)
+    svc.page_runner, svc.retry_delays = runner, ()
+    assert svc.solve_all("papaya01", "-", KID) == "done"
+    assert len(n.to(KID)) == 1, "only the live status message is sent to the student"
+    final = n.edits[-1]
+    assert final[1] == 1 and "الحلول جاهزة" in final[2] and "submitall" in json.dumps(final[3])
+    body, _, errors = final[2].partition("ما ضبطت (1)")
+    assert errors and "الصفحة ما فتحت" in errors and "الصفحة ما فتحت" not in body
+    assert len(n.to(ADMIN)) == 1, "one admin summary for the whole batch"
+
+
+def test_solve_all_in_parallel_with_a_real_db_file(tmp_path):
+    path = str(tmp_path / "p.db")
+    db, svc, n, ad, calls, iid = setup(db=DB(path))
+    svc.db_factory = lambda: DB(path)
+    svc.notifier = n = LiveNotif()
+    db.set_setting("papaya01", "direct_submit", 1)
+    opened = svc._listed_items(db, "papaya01")
+    assert svc.solve_all("papaya01", "-", KID) == "done"
+    assert all(DB(path).solution("papaya01", r["id"])["status"] == "submitted" for r in opened)
+    assert f"سلّمت {len(opened)} من {len(opened)}" in n.edits[-1][2] and len(n.to(KID)) == 1
+
+
+def test_batch_confirm_is_one_look_and_one_message():
+    db, svc, n, ad, calls, iid = setup()
+    db.set_setting("papaya01", "direct_submit", 1)
+    looks = []
+    verify = lambda acct, item: True
+    verify.many = lambda acct, ids: looks.append(ids) or {i: False for i in ids}   # all still open
+    svc.verify_fn, svc.confirm_after = verify, 0
+    svc.spawn_bg = lambda fn: fn()
+    opened = svc._listed_items(db, "papaya01")
+    svc.solve_all("papaya01", "-", KID)
+    assert len(looks) == 1 and len(looks[0]) == len(opened)
+    warn = [t for t in n.to(KID) if "لسه تعرض" in t]
+    assert len(warn) == 1 and all(escape_title in warn[0] for escape_title in
+                                  [r["title"].split("(")[0].strip() for r in opened])

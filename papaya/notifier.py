@@ -62,6 +62,39 @@ class TelegramNotifier:
                 pass
         return mid
 
+    def edit(self, chat_id, message_id, text: str, markup=None) -> bool:
+        """Rewrite a message the bot sent (one live status message instead of many).
+        True when Telegram took it, or the text was already exactly this."""
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML",
+                   "disable_web_page_preview": True}
+        if markup:
+            payload["reply_markup"] = markup
+        body = json.dumps(payload).encode()
+        for attempt in range(2):
+            req = urllib.request.Request(self.base + "editMessageText", body, {"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=20).close()
+                return True
+            except urllib.error.HTTPError as e:
+                try:
+                    err = json.load(e)
+                except Exception:
+                    err = {}
+                if "not modified" in str(err.get("description", "")):
+                    return True
+                if e.code == 429 and attempt == 0:
+                    time.sleep(min(int((err.get("parameters") or {}).get("retry_after") or 3), 30))
+                    continue
+                return False
+            except urllib.error.URLError:
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                return False
+            except Exception:
+                return False
+        return False
+
     def delete(self, chat_id, ids) -> None:
         ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool)]
         for k in range(0, len(ids), 100):

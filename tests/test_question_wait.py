@@ -76,6 +76,7 @@ def test_new_layout_is_caught_not_half_solved(browser, monkeypatch, tmp_path):
     ("<p>لقد قمت بحل هذا الواجب</p>", "done"),
     ("<p>انتهى وقت الواجب</p>", "closed"),
     ("<title>503 Service Unavailable</title>", "error"),
+    ("<p>حدث خطأً ما</p><h2>ليس لديك صلاحية لإتمام العملية</h2>", "locked"),   # not open yet, not an error
     ("<p>صفحة فاضية</p>", "unknown"),
     ("<script>var x='تم تسليم'</script><p>شي</p>", "unknown"),      # words inside scripts don't count
 ])

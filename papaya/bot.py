@@ -168,7 +168,7 @@ def settings_view(db: DB, account: str):
         [(f"التسليم الخارجي 📨 {onoff(s.remind_external)}", "t:remind_external")],
     ]
     if solver_on:   # these rows do not exist at all for devices without the feature
-        rows.append([(f"حل تلقائي قبل 5س 🤖 {onoff(s.auto_solve)}", "t:auto_solve"),
+        rows.append([(f"حل تلقائي قبل 24س 🤖 {onoff(s.auto_solve)}", "t:auto_solve"),
                      (f"تسليم تلقائي 📤 {onoff(s.auto_submit)}", "t:auto_submit")])
         rows.append([(f"سلّم مباشرة بدون معاينة ⚡ {onoff(s.direct_submit)}", "t:direct_submit")])
     rows.append([(f"احذف الرسائل بعد 24 ساعة 🧹 {onoff(s.autoclean)}", "t:autoclean")])

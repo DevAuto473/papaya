@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from html import escape
@@ -15,8 +16,10 @@ from . import ai, assignment_page, scraper, solver
 from .parser import RIYADH
 from .reminders import fmt_left, in_horizon, in_quiet_hours
 
-AUTO_SOLVE_BEFORE = timedelta(hours=5)
+AUTO_SOLVE_BEFORE = timedelta(hours=24)
 AUTO_SUBMIT_BEFORE = timedelta(hours=1)
+AUTO_RETRY_AFTER = timedelta(minutes=30)   # auto mode: an item that failed waits this long before another try
+AUTO_RETRY_LOCKED = timedelta(hours=1)     # ... and this long when the platform says it is not open yet
 AUTO_PER_PASS = 3          # items handled per check (every ~10 min), earliest deadline first
 MAX_MSG = 3500
 RETRY_DELAYS = (20, 60)    # seconds to wait before the 2nd and 3rd try of a page that may come back
@@ -123,6 +126,9 @@ class SolveService:
         self._busy: set = set()
         self._lock = threading.Lock()
         self._progress: dict = {}          # chat -> ids of "⏳ ..." messages to remove when done
+        self._auto_wait: dict = {}         # (acct, item_id) -> no automatic try before this time
+        self._tl = threading.local()       # inside a batch: admin notes / confirm checks are collected
+        self.batch_workers = 2             # 'solve all': AI thinks on one item while the browser does the next
 
     def _open_page(self, acct, url, fn):
         """Real browser. Passes the account's assignments list so an ended session logs in again."""
@@ -195,6 +201,10 @@ class SolveService:
             self.notifier.delete(chat, ids)
 
     def _admin(self, text):
+        notes = getattr(self._tl, "notes", None)
+        if notes is not None:              # batch job: one admin summary at the end, not one per item
+            notes.append(text)
+            return
         aid = self.admin_id_fn()
         if aid:
             self.notifier.send(aid, text, None, silent=True)
@@ -265,6 +275,11 @@ class SolveService:
             self._say_progress(chat, f"أحل لك «{escape(_short(row['title'], 60))}»… (دقيقة أو دقيقتين) ⏳")
         try:
             questions = self._read_page(db, acct, row, chat, quiet_progress)
+        except assignment_page.PageNotReady as e:
+            if e.state != "locked":
+                self._admin(f"حل {acct}: {e.ar} ⚠️")
+                return "page_error:" + e.ar, None, False
+            return "locked", None, False           # not open yet: normal, no admin alert
         except scraper.PapayaError as e:
             self._admin(f"حل {acct}: {e.ar} ⚠️")
             return "page_error:" + e.ar, None, False
@@ -328,6 +343,10 @@ class SolveService:
         really done. If it is still open there, the student is told and it shows up again."""
         if not self.verify_fn or self.confirm_after is None:
             return
+        later = getattr(self._tl, "confirm", None)
+        if later is not None:              # batch job: one combined check (and message) for all of them
+            later.append(row)
+            return
         def run():
             import time
             for wait in (self.confirm_after, self.confirm_after * 3):
@@ -369,7 +388,9 @@ class SolveService:
             if status == "submitted":
                 self._say(chat, "هذا الواجب انسلّم من قبل ✅"); return "submitted"
             if data is None:
-                self._say(chat, _fail_text(status)); return status.split(":")[0]
+                if not auto:                      # auto mode retries later on its own: no message per try
+                    self._say(chat, _fail_text(status))
+                return status.split(":")[0]
             s = db.get_settings(acct)
             if s.direct_submit:                   # owner chose: no preview tap
                 st, why = self._submit_core(db, acct, row, data)
@@ -440,6 +461,56 @@ class SolveService:
         return "dropped"
 
     # ---- all assignments at once -------------------------------------------
+    # One status message ("⏳ 2/5") is edited in place while the job runs and becomes the result at
+    # the end: what worked first, then every problem together in one block. Admin notes and the
+    # "is it really submitted?" checks are also collected and sent once for the whole batch.
+    def _run_batch(self, acct, chat, rows, step, title):
+        """step(db, row) -> (ok_line | None, err_line | None, stop_all). Items run a few at a time
+        (the browser profile lock keeps page work one-by-one; the AI calls overlap)."""
+        total = len(rows)
+        live = _Live(self, chat, _progress_text(title, 0, total))
+        notes, confirm = [], []
+        oks, errs = [None] * total, [None] * total
+        stop, skipped = threading.Event(), [0]
+
+        def one(i, r):
+            t = escape(_short(r["title"], 45))
+            if stop.is_set():
+                skipped[0] += 1
+                return
+            if not self._claim((acct, r["id"])):
+                errs[i] = f"{t} — شغال عليه من قبل ⏳"
+                return
+            self._tl.notes, self._tl.confirm = notes, confirm
+            try:
+                ok, err, halt = step(self.db_factory(), r, t)
+                oks[i], errs[i] = ok, err
+                if halt:
+                    stop.set()
+            except Exception as e:                 # one broken item never sinks the whole batch
+                errs[i] = f"{t} — صار خطأ ⚠️"
+                notes.append(f"{acct}: «{t}» {type(e).__name__}: {escape(str(e)[:120])} ⚠️")
+            finally:
+                self._tl.notes = self._tl.confirm = None
+                self._release((acct, r["id"]))
+
+        workers = max(1, min(self.batch_workers, total))
+        if workers > 1 and self.db_factory() is self.db_factory():
+            workers = 1                            # one shared connection: threads would trample each other
+        with ThreadPoolExecutor(workers) as ex:
+            futs = [ex.submit(one, i, r) for i, r in enumerate(rows)]
+            for n, _ in enumerate(as_completed(futs), 1):
+                if n < total:
+                    live.update(_progress_text(title, n, total))
+        errs = [e for e in errs if e]
+        if skipped[0]:
+            errs.append(f"باقي {skipped[0]} ما حليتها: وصلنا سقف المصروف الشهري ⛔")
+        return live, [o for o in oks if o], errs, notes, confirm
+
+    def _batch_admin(self, acct, line, notes):
+        notes = list(dict.fromkeys(notes))         # same warning from several items: say it once
+        self._admin(_cap(line + ("\n" + "\n".join(f"• {x}" for x in notes) if notes else "")))
+
     def solve_all(self, acct: str, _arg, chat) -> str:
         db = self.db_factory()
         if not db.solver_enabled(acct):
@@ -447,8 +518,11 @@ class SolveService:
         if not self._claim((acct, "*")):
             return "busy"
         try:
-            rows = [r for r in self._listed_items(db, acct)
-                    if not (db.solution(acct, r["id"]) and db.solution(acct, r["id"])["status"] == "submitted")]
+            rows = []
+            for r in self._listed_items(db, acct):
+                sol = db.solution(acct, r["id"])
+                if not (sol and sol["status"] == "submitted"):
+                    rows.append(r)
             if not rows:
                 done = db.done_keys(acct)
                 exams = sum(1 for r in db.upcoming(acct, self.now(), limit=60)
@@ -457,37 +531,34 @@ class SolveService:
                           + (f"\nباقي {exams} اختبار، والاختبارات تحلها بنفسك ✍️" if exams else ""))
                 return "none"
             direct = db.get_settings(acct).direct_submit
-            self._say_progress(chat, f"أحل {len(rows)} واجب{'ات' if len(rows) > 2 else ''}"
-                            f"{' وأسلّمها' if direct else ''}… (تقريباً دقيقة لكل واجب) ⏳")
-            lines, ready = [], 0
-            for r in rows:
-                if not self._claim((acct, r["id"])):
-                    lines.append(f"{escape(_short(r['title'], 45))} — شغال عليه من قبل ⏳"); continue
-                try:
-                    status, data, agree = self._solve_core(db, acct, r, chat, quiet_progress=True)
-                    if data is None:
-                        lines.append(f"{escape(_short(r['title'], 45))} — {_fail_text(status, short=True)} ❌")
-                        if status == "budget":
-                            break
-                        continue
-                    ok, n = sum(a["agree"] for a in data["answers"]), len(data["answers"])
-                    tag = f"{ok}/{n} ✅" if ok == n else f"{ok}/{n} ✅ · ⚠️ {n - ok}"
-                    if direct:
-                        st, why = self._submit_core(db, acct, r, data)
-                        lines.append((f"{escape(_short(r['title'], 45))} — {tag} 📤" if st == "submitted"
-                                      else f"{escape(_short(r['title'], 45))} — ما انسلّم: {escape(why)} ❌"))
-                    else:
-                        ready += 1
-                        lines.append(f"🆗 {escape(_short(r['title'], 45))} — {tag}")
-                finally:
-                    self._release((acct, r["id"]))
-            head = "<b>النتيجة</b> 📤" if direct else "<b>الحلول جاهزة</b> 🆘"
-            kb = None
-            if ready:
-                kb = {"inline_keyboard": [[{"text": f"سلّم الكل ({ready}) 📤", "callback_data": "submitall:-"}]]}
-                lines.append("\nتبغى تشوف حل واجب معيّن؟ اضغط 🆘 جنبه في /list")
-            self._say(chat, head + "\n" + "\n".join(lines), kb)
-            self._admin(f"{acct}: حل الكل — {len(rows)} واجب 🆘")
+
+            def step(db, r, t):
+                status, data, _agree = self._solve_core(db, acct, r, chat, quiet_progress=True)
+                if status == "submitted":
+                    return f"📤 {t} — انسلّم من قبل", None, False
+                if data is None:
+                    return None, f"{t} — {_fail_text(status, short=True)}", status == "budget"
+                ok, n = sum(a["agree"] for a in data["answers"]), len(data["answers"])
+                tag = f"{ok}/{n} ✅" if ok == n else f"{ok}/{n} ✅ · ⚠️ {n - ok}"
+                if direct:
+                    st, why = self._submit_core(db, acct, r, data)
+                    if st == "submitted":
+                        return f"📤 {t} — {tag}", None, False
+                    return None, f"{t} — ما انسلّم: {escape(why)}", False
+                return f"🆗 {t} — {tag}", None, False
+
+            title = "أحل واجباتك" + (" وأسلّمها" if direct else "")
+            live, oks, errs, notes, confirm = self._run_batch(acct, chat, rows, step, title)
+            ready = sum(o.startswith("🆗") for o in oks)
+            head = (f"<b>النتيجة</b> — سلّمت {len(oks)} من {len(rows)} 📤" if direct
+                    else f"<b>الحلول جاهزة</b> — {len(oks)} من {len(rows)} 🆘")
+            tail = "\nتبغى تشوف حل واجب معيّن؟ اضغط 🆘 جنبه في /list" if ready else ""
+            kb = ({"inline_keyboard": [[{"text": f"سلّم الكل ({ready}) 📤", "callback_data": "submitall:-"}]]}
+                  if ready else None)
+            live.finish(_summary(head, oks, errs) + tail, kb)
+            self._batch_admin(acct, f"{acct}: حل الكل — {len(oks)}/{len(rows)} ✅"
+                              + (f" · {len(errs)} ❌" if errs else "") + " 🆘", notes)
+            self._confirm_many(acct, confirm)
             return "done"
         finally:
             self._release((acct, "*"))
@@ -504,23 +575,78 @@ class SolveService:
             todo = [(r, s) for r, s in todo if s and s["status"] in ("ready", "failed")]
             if not todo:
                 self._say(chat, "ما عندي حلول جاهزة للتسليم."); return "none"
-            self._say_progress(chat, f"أسلّم {len(todo)} واجب… ⏳")
-            lines = []
-            for r, s in todo:
-                if not self._claim((acct, r["id"])):
-                    continue
-                try:
-                    st, why = self._submit_core(db, acct, r, json.loads(s["data"]))
-                finally:
-                    self._release((acct, r["id"]))
-                lines.append(f"{escape(_short(r['title'], 45))} 📤" if st == "submitted"
-                             else f"{escape(_short(r['title'], 45))} — {escape(why)} ❌")
-            self._say(chat, "<b>التسليم</b> 📤\n" + "\n".join(lines))
-            self._admin(f"{acct}: سلّم الكل — {sum(l.endswith('📤') for l in lines)}/{len(lines)} 📤")
+            data = {r["id"]: json.loads(s["data"]) for r, s in todo}
+
+            def step(db, r, t):
+                st, why = self._submit_core(db, acct, r, data[r["id"]])
+                if st == "submitted":
+                    return f"📤 {t}", None, False
+                return None, f"{t} — {escape(why)}", False
+
+            rows = [r for r, _ in todo]
+            live, oks, errs, notes, confirm = self._run_batch(acct, chat, rows, step, "أسلّم واجباتك")
+            live.finish(_summary(f"<b>التسليم</b> — سلّمت {len(oks)} من {len(rows)} 📤", oks, errs))
+            self._batch_admin(acct, f"{acct}: سلّم الكل — {len(oks)}/{len(rows)} 📤"
+                              + (f" · {len(errs)} ❌" if errs else ""), notes)
+            self._confirm_many(acct, confirm)
             return "done"
         finally:
             self._release((acct, "*"))
             self._clear_progress(chat)
+
+    def _confirm_many(self, acct, rows):
+        """Like _confirm_later, for a whole batch: one look at the platform list for all items
+        (when verify_fn offers .many) and ONE message naming every item that is still open."""
+        if not rows or not self.verify_fn or self.confirm_after is None:
+            return
+        rows = [dict(r) for r in rows]
+
+        def check(items):
+            many = getattr(self.verify_fn, "many", None)
+            if many:
+                res = many(acct, [r["id"] for r in items])
+                if res is not None:
+                    return res
+                return {r["id"]: None for r in items}
+            return {r["id"]: self.verify_fn(acct, r["id"]) for r in items}
+
+        def run():
+            import time
+            todo = rows
+            for wait in (self.confirm_after, self.confirm_after * 3):
+                time.sleep(wait)
+                res = check(todo)
+                db = self.db_factory()
+                log = getattr(db, "log", lambda *a: None)
+                still, unknown = [], []
+                for r in todo:
+                    gone = res.get(r["id"])
+                    if gone is None:
+                        unknown.append(r)            # could not look (no internet...): try once more
+                    elif gone:
+                        log(acct, f"✅ تأكدت من المنصة: {_short(r['title'], 50)} انسلّم")
+                    else:
+                        db.set_solution_status(acct, r["id"], "failed", self.now())
+                        log(acct, f"⚠️ بعد التسليم المنصة لسه تعرض {_short(r['title'], 50)} مفتوح")
+                        still.append(r)
+                if still:
+                    chat = db.chat_id(acct)
+                    if chat:
+                        btns = [[{"text": f"✍️ {_short(r['title'], 30)}", "url": r["solve_url"]}]
+                                for r in still if r.get("solve_url")][:8]
+                        self._say(chat, _cap("⚠️ ضغطت تسليم بس المنصة لسه تعرض هذي مفتوحة:\n"
+                                             + "\n".join(f"• {escape(r['title'])}" for r in still)
+                                             + "\nافتحها وتأكد بنفسك 👇"),
+                                  {"inline_keyboard": btns} if btns else None)
+                if len(unknown) < len(todo) and self.on_change:
+                    try:
+                        self.on_change(acct)
+                    except Exception:
+                        pass
+                todo = unknown
+                if not todo:
+                    return
+        self.spawn_bg(run)
 
     # ---- automatic (called after each periodic check) --------------------
     def auto(self, acct: str) -> list[str]:
@@ -537,7 +663,14 @@ class SolveService:
                 continue
             sol = db.solution(acct, r["id"])
             if sol is None and s.auto_solve:
-                done.append(self.prepare(acct, r["id"], chat, auto=True))
+                if self._auto_wait.get((acct, r["id"]), now) > now:
+                    continue                       # failed recently: wait before trying again
+                st = self.prepare(acct, r["id"], chat, auto=True)
+                done.append(st)
+                if st not in ("ready", "submitted", "resent", "busy", "denied"):
+                    self._auto_wait[(acct, r["id"])] = now + (
+                        AUTO_RETRY_LOCKED if st == "locked"
+                        else AUTO_RETRY_AFTER)
             elif (sol and sol["status"] == "ready" and sol["all_agree"] and s.auto_submit
                     and left <= AUTO_SUBMIT_BEFORE):
                 done.append(self.submit(acct, r["id"], chat, auto=True))
@@ -548,6 +681,46 @@ class SolveService:
         return done
 
 
+class _Live:
+    """One status message edited in place. Falls back to a fresh message when it can't be edited."""
+
+    def __init__(self, svc, chat, text):
+        self.svc, self.chat, self.last = svc, chat, 0.0
+        mid = svc._say(chat, text, silent=True)
+        self.mid = mid if isinstance(mid, int) and not isinstance(mid, bool) else None
+        self.can = self.mid is not None and hasattr(svc.notifier, "edit")
+
+    def update(self, text):
+        import time
+        if self.can and time.monotonic() - self.last >= 1.5:   # Telegram limits how fast one message is edited
+            self.last = time.monotonic()
+            self.svc.notifier.edit(self.chat, self.mid, text)
+
+    def finish(self, text, markup=None):
+        if self.can and self.svc.notifier.edit(self.chat, self.mid, text, markup):
+            return
+        if self.mid is not None and hasattr(self.svc.notifier, "delete"):
+            self.svc.notifier.delete(self.chat, [self.mid])
+        self.svc._say(self.chat, text, markup)
+
+
+def _progress_text(title: str, done: int, total: int) -> str:
+    k = round(10 * done / total) if total else 10
+    return f"<b>{title}…</b> ⏳\n{'▰' * k}{'▱' * (10 - k)} {done}/{total}\n(تقريباً دقيقة لكل واجب)"
+
+
+def _cap(text: str) -> str:
+    return text if len(text) <= MAX_MSG else text[: MAX_MSG - 1] + "…"
+
+
+def _summary(head: str, oks: list[str], errs: list[str]) -> str:
+    out = head
+    if oks:
+        out += "\n" + "\n".join(oks)
+    if errs:
+        out += f"\n\n<b>ما ضبطت ({len(errs)})</b> ⚠️\n" + "\n".join(f"• {e}" for e in errs)
+    return _cap(out)
+
 def _fail_text(status: str, short: bool = False) -> str:
     kind, _, detail = status.partition(":")
     txt = {
@@ -555,6 +728,7 @@ def _fail_text(status: str, short: bool = False) -> str:
         "nokey": "ميزة الحل غير مفعّلة على السيرفر حالياً ⚠️",
         "page_error": f"ما قدرت أفتح الواجب: {detail} ⚠️",
         "empty": "ما لقيت أسئلة في صفحة الواجب ⚠️",
+        "locked": "الواجب لسا ما انفتح للحل في المنصة، جرّب بعدين ⏳",
         "ai_error": "النماذج ما ردت بحل صالح. جرّب مرة ثانية بعد شوي ⚠️",
     }.get(kind, "صار خطأ ⚠️")
     return txt.split(".")[0] if short else txt

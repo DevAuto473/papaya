@@ -129,6 +129,17 @@ def _still_open(db_path: str):
             if it.id == item_id:
                 return not it.is_open or it.done          # still listed and open -> not submitted
         return True                                       # gone from 'Current' -> submitted
+
+    def many(acct: str, item_ids):
+        """Same answer for several items with ONE look at the list (used after 'solve all')."""
+        urls = json.loads(DB(db_path).get_meta(f"urls:{acct}") or "{}")
+        try:
+            a_html, *_ = scraper.fetch(profile_dir(acct), urls, finished=False)
+        except scraper.PapayaError:
+            return None
+        listed = {it.id: (not it.is_open or it.done) for it in parse_assignments(a_html)}
+        return {i: listed.get(i, True) for i in item_ids}
+    verify.many = many
     return verify
 
 

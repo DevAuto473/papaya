@@ -38,6 +38,7 @@ class PageNotReady(ScrapeError):
     TEXT = {
         "done":    ("هذا الواجب محلول أو مسلَّم من قبل", "already submitted", False),
         "closed":  ("هذا الواجب مقفل أو انتهى وقته في المنصة", "closed on the platform", False),
+        "locked":  ("الواجب لسا ما انفتح للحل في المنصة", "not open for solving yet (no permission)", False),
         "error":   ("المنصة رجعت صفحة خطأ أو صيانة", "platform error page", True),
         "login":   ("المنصة طلبت تسجيل دخول بدل ما تفتح الواجب", "login page instead of the assignment", True),
         "unknown": ("صفحة الواجب فتحت بدون أسئلة", "page opened without questions", True),
@@ -59,6 +60,8 @@ class LayoutChanged(ScrapeError):
 
 _DONE = ("تم تسليم", "تم التسليم", "تم حل الواجب", "سبق لك", "لقد قمت بحل", "تم إرسال الإجابات")
 _CLOSED = ("انتهى وقت", "انتهت مدة", "انتهى موعد", "انتهت فترة", "الواجب مغلق", "غير متاح حالياً", "غير متاح حاليا")
+# the platform's "no permission" page: the item is listed but not open yet (e.g. not published)
+_LOCKED = ("ليس لديك صلاحية", "ليس لديك الصلاحية")
 _ERROR = ("حدث خطأ", "خطأ في الخادم", "صيانة", "Service Unavailable", "Bad Gateway", "Server Error",
           "Gateway Time-out", "Too Many Requests")
 
@@ -70,7 +73,7 @@ def _visible_text(soup) -> str:
 
 
 def page_state(html: str, url: str = "") -> str:
-    """Why a solve page has no questions: login / done / closed / error / unknown."""
+    """Why a solve page has no questions: login / done / closed / locked / error / unknown."""
     if any(h in (url or "") for h in MS_HOSTS) or "loginfmt" in html:
         return "login"
     soup = BeautifulSoup(html, "html.parser")
@@ -80,6 +83,8 @@ def page_state(html: str, url: str = "") -> str:
         return "done"
     if any(w in text for w in _CLOSED):
         return "closed"
+    if any(w in text for w in _LOCKED):            # before _ERROR: this page also says "حدث خطأ ما"
+        return "locked"
     if any(w in title or w in text for w in _ERROR):
         return "error"
     return "unknown"

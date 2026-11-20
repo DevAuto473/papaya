@@ -139,7 +139,8 @@ def parse_exams(html: str) -> list[Item]:
                 iid = m.group(1)
                 modal = soup.find(id=f"InfoDiv{iid}")
                 break
-        solve = card.select_one("a[href*=SolveLectureExam]")
+        # the platform has used both /Exams/SolveLectureExam/ and /Exams/SolvePublishedExam/
+        solve = card.select_one("a[href*=SolveLectureExam], a[href*=SolvePublishedExam]")
         badge = card.select_one(".status-badge")
         items.append(Item(
             kind="exam",
